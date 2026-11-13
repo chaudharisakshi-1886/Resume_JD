@@ -214,6 +214,23 @@ CREATE TABLE IF NOT EXISTS output1 (
   created_by TEXT
 );
 
+-- 11. Upload Queue Table
+CREATE TABLE IF NOT EXISTS upload_queue (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  batch_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  position_id TEXT,
+  file_name TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  file_type TEXT NOT NULL CHECK (file_type IN ('candidate','job')),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','processing','done','failed')),
+  error_message TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  processed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_upload_queue_status ON upload_queue(status);
+
 -- Create indexes for performance
 CREATE INDEX IF NOT EXISTS idx_candidate1_user_id ON candidate1(user_id);
 CREATE INDEX IF NOT EXISTS idx_candidate1_position_id ON candidate1(position_id);
