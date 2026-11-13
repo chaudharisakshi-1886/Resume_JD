@@ -220,3 +220,4 @@ CREATE INDEX IF NOT EXISTS idx_candidate1_position_id ON candidate1(position_id)
 CREATE INDEX IF NOT EXISTS idx_candidate1_email ON candidate1(candidate_email);
 CREATE INDEX IF NOT EXISTS idx_job_descriptions_created_by ON job_descriptions("createdBy");
 CREATE INDEX IF NOT EXISTS idx_job_descriptions_job_code ON job_descriptions(job_code);
+
