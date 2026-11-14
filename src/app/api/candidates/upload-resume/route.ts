@@ -1,3 +1,5 @@
+export const runtime = 'nodejs';
+
 import '@/utils/dns-fix';
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/utils/auth';
@@ -74,12 +76,17 @@ export async function POST(request: Request) {
 
         // Save original uploaded file bytes exactly: read with Buffer.from(await file.arrayBuffer()) and write with fs.promises.writeFile
         for (const file of uploadedFiles) {
-          const fileBuffer = Buffer.from(await file.arrayBuffer());
+          const buffer = Buffer.from(await file.arrayBuffer());
           const safeName = sanitizeFileName(file.name);
           const savedFileName = `${batchId}_${Date.now()}_${safeName}`;
           const filePath = path.join(targetDir, savedFileName);
 
-          await fs.promises.writeFile(filePath, fileBuffer);
+          await fs.promises.writeFile(filePath, buffer);
+
+          const stat = await fs.promises.stat(filePath);
+          if (stat.size <= 0 || stat.size !== buffer.length) {
+            throw new Error(`File write verification failed for "${file.name}": saved size is ${stat.size} bytes, expected ${buffer.length} bytes.`);
+          }
 
           queuedFiles.push({
             name: file.name,
@@ -92,7 +99,12 @@ export async function POST(request: Request) {
           const directName = sanitizeFileName((formData.get('fileName') as string) || 'manual-resume.txt');
           const savedFileName = `${batchId}_${Date.now()}_${directName}`;
           const filePath = path.join(targetDir, savedFileName);
-          await fs.promises.writeFile(filePath, Buffer.from(directText.trim(), 'utf-8'));
+          const textBuffer = Buffer.from(directText.trim(), 'utf-8');
+          await fs.promises.writeFile(filePath, textBuffer);
+          const stat = await fs.promises.stat(filePath);
+          if (stat.size <= 0 || stat.size !== textBuffer.length) {
+            throw new Error(`File write verification failed for "${directName}": saved size is ${stat.size} bytes, expected ${textBuffer.length} bytes.`);
+          }
           queuedFiles.push({
             name: directName,
             safeFileName: savedFileName,
@@ -207,24 +219,13 @@ export async function POST(request: Request) {
         const jsonItems: { name: string; buffer: Buffer }[] = [];
         if (Array.isArray(body.resumes) && body.resumes.length > 0) {
           for (const item of body.resumes) {
-            const rawBase64 = item.base64 || item.file_base64 || item.fileContent || item.file_content;
-            if (rawBase64 && typeof rawBase64 === 'string') {
+            const rawData = item.base64 || item.file_base64 || item.fileContent || item.data || item.text;
+            if (rawData && typeof rawData === 'string') {
+              const cleanBase64 = rawData.replace(/^data:[^;]+;base64,/, '').trim();
+              const buffer = Buffer.from(cleanBase64, 'base64');
               jsonItems.push({
-                name: item.file_name || 'resume.bin',
-                buffer: Buffer.from(rawBase64, 'base64'),
-              });
-            } else if (item.text && typeof item.text === 'string' && item.text.trim().length > 0) {
-              const name = item.file_name || 'resume.txt';
-              const isBinaryDoc = /\.(pdf|docx?|xlsx?|csv)$/i.test(name);
-              if (isBinaryDoc) {
-                return NextResponse.json(
-                  { error: `Cannot save extracted text as binary file "${name}". Please upload original file via multipart/form-data.` },
-                  { status: 400 }
-                );
-              }
-              jsonItems.push({
-                name,
-                buffer: Buffer.from(item.text.trim(), 'utf-8'),
+                name: item.file_name || 'resume.pdf',
+                buffer,
               });
             }
           }
@@ -234,7 +235,7 @@ export async function POST(request: Request) {
         }
 
         if (jsonItems.length === 0) {
-          return NextResponse.json({ error: 'Please provide at least one resume with non-empty text or original file content.' }, { status: 400 });
+          return NextResponse.json({ error: 'Please provide at least one resume with non-empty content.' }, { status: 400 });
         }
 
         const positionId = (body.position_id || body.positionId || body.jobId)?.toString() || null;
@@ -257,6 +258,11 @@ export async function POST(request: Request) {
           const filePath = path.join(targetDir, savedFileName);
 
           await fs.promises.writeFile(filePath, item.buffer);
+
+          const stat = await fs.promises.stat(filePath);
+          if (stat.size <= 0 || stat.size !== item.buffer.length) {
+            throw new Error(`File write verification failed for "${item.name}": saved size is ${stat.size} bytes, expected ${item.buffer.length} bytes.`);
+          }
 
           await pool.query(
             `INSERT INTO upload_queue (batch_id, user_id, position_id, file_name, file_path, file_type, status)

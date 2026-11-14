@@ -1,10 +1,14 @@
+export const runtime = 'nodejs';
+
 import '@/utils/dns-fix';
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/utils/auth';
 import { extractTextFromFile, isSupportedFormat, resolveFileType } from '@/utils/documentParser';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import { createBatch, processJobBatchAsync, updateBatchStatus } from '@/services/batchService';
-import { saveFileToIncoming } from '@/lib/upload-storage';
+import { sanitizeFileName } from '@/lib/upload-storage';
 import { pool } from '@/database/db';
 import { UploadBatchResponse } from '@/types';
 
@@ -56,9 +60,8 @@ export async function POST(request: Request) {
         );
       }
 
-      // If QUEUED MODE: Save JD files directly to incoming/jobs folder without real-time parsing
+      // If QUEUED MODE: Save original uploaded JD files directly without text conversion or encoding
       if (isQueuedMode) {
-        const filesToQueue: { name: string; buffer: Buffer }[] = [];
         for (const file of uploadedFiles) {
           if (!isSupportedFormat(file.name)) {
             return NextResponse.json(
@@ -66,58 +69,81 @@ export async function POST(request: Request) {
               { status: 400 }
             );
           }
-          filesToQueue.push({
+        }
+
+        const batchId = `batch_job_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        const uploadBaseDir = process.env.UPLOAD_DIR || 'E:/Srinivas/upload_resumes';
+        const targetDir = path.join(uploadBaseDir, 'incoming', 'jobs');
+        await fs.promises.mkdir(targetDir, { recursive: true });
+
+        const queuedFiles: { name: string; safeFileName: string; filePath: string }[] = [];
+
+        for (const file of uploadedFiles) {
+          const buffer = Buffer.from(await file.arrayBuffer());
+          const safeName = sanitizeFileName(file.name);
+          const savedFileName = `${batchId}_${Date.now()}_${safeName}`;
+          const filePath = path.join(targetDir, savedFileName);
+
+          await fs.promises.writeFile(filePath, buffer);
+
+          const stat = await fs.promises.stat(filePath);
+          if (stat.size <= 0 || stat.size !== buffer.length) {
+            throw new Error(`File write verification failed for "${file.name}": saved size is ${stat.size} bytes, expected ${buffer.length} bytes.`);
+          }
+
+          queuedFiles.push({
             name: file.name,
-            buffer: Buffer.from(await file.arrayBuffer()),
+            safeFileName: savedFileName,
+            filePath,
           });
         }
 
         if (directText && directText.trim().length > 0) {
-          const directName = (formData.get('fileName') as string) || 'manual-job-description.txt';
-          filesToQueue.push({
+          const directName = sanitizeFileName((formData.get('fileName') as string) || 'manual-job-description.txt');
+          const savedFileName = `${batchId}_${Date.now()}_${directName}`;
+          const filePath = path.join(targetDir, savedFileName);
+          const textBuffer = Buffer.from(directText.trim(), 'utf-8');
+          await fs.promises.writeFile(filePath, textBuffer);
+          const stat = await fs.promises.stat(filePath);
+          if (stat.size <= 0 || stat.size !== textBuffer.length) {
+            throw new Error(`File write verification failed for "${directName}": saved size is ${stat.size} bytes, expected ${textBuffer.length} bytes.`);
+          }
+          queuedFiles.push({
             name: directName,
-            buffer: Buffer.from(directText.trim(), 'utf-8'),
+            safeFileName: savedFileName,
+            filePath,
           });
         }
-
-        const batchId = `batch_job_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 
         await createBatch({
           id: batchId,
           userId: user.id,
           batchType: 'job',
-          totalReceived: filesToQueue.length,
+          totalReceived: queuedFiles.length,
           metadata: {
-            file_names: filesToQueue.map((f) => f.name),
+            file_names: queuedFiles.map((f) => f.name),
             mode: 'queued',
           },
         });
 
-        for (const item of filesToQueue) {
-          const { filePath, safeFileName } = await saveFileToIncoming(
-            item.buffer,
-            item.name,
-            'job',
-            batchId
-          );
-
+        for (const item of queuedFiles) {
           await pool.query(
             `INSERT INTO upload_queue (batch_id, user_id, position_id, file_name, file_path, file_type, status)
              VALUES ($1, $2, $3, $4, $5, 'job', 'pending')`,
-            [batchId, user.id, positionId || null, safeFileName, filePath]
+            [batchId, user.id, positionId || null, item.safeFileName, item.filePath]
           );
         }
 
         await updateBatchStatus(batchId, {
           status: 'queued',
-          message: `${filesToQueue.length} job file(s) saved and queued for background processing.`,
+          message: `${queuedFiles.length} job file(s) saved and queued for background processing.`,
         });
 
         return NextResponse.json(
           {
             batch_id: batchId,
             status: 'queued',
-            total_received: filesToQueue.length,
+            total_received: queuedFiles.length,
             message: 'Job descriptions uploaded and queued for background processing.',
           },
           { status: 202 }
@@ -191,6 +217,83 @@ export async function POST(request: Request) {
     } else if (contentType.includes('application/json')) {
       const body = await request.json();
       customWebhookUrl = body.webhook_url || body.webhookUrl || null;
+
+      if (isQueuedMode) {
+        const jsonItems: { name: string; buffer: Buffer; positionId?: string | null }[] = [];
+        if (Array.isArray(body.job_descriptions) && body.job_descriptions.length > 0) {
+          for (const item of body.job_descriptions) {
+            const rawData = item.base64 || item.file_base64 || item.fileContent || item.data || item.text || item.description;
+            if (rawData && typeof rawData === 'string') {
+              const cleanBase64 = rawData.replace(/^data:[^;]+;base64,/, '').trim();
+              const buffer = Buffer.from(cleanBase64, 'base64');
+              jsonItems.push({
+                name: item.file_name || 'job_description.pdf',
+                buffer,
+                positionId: item.position_id || null,
+              });
+            }
+          }
+        } else if ((body.text || body.description) && typeof (body.text || body.description) === 'string') {
+          const directName = body.fileName || body.file_name || 'pasted-job-description.txt';
+          const textVal = (body.text || body.description).trim();
+          jsonItems.push({
+            name: directName,
+            buffer: Buffer.from(textVal, 'utf-8'),
+            positionId: body.position_id || null,
+          });
+        }
+
+        if (jsonItems.length === 0) {
+          return NextResponse.json({ error: 'Please provide at least one job description with valid content.' }, { status: 400 });
+        }
+
+        const batchId = `batch_job_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        const uploadBaseDir = process.env.UPLOAD_DIR || 'E:/Srinivas/upload_resumes';
+        const targetDir = path.join(uploadBaseDir, 'incoming', 'jobs');
+        await fs.promises.mkdir(targetDir, { recursive: true });
+
+        await createBatch({
+          id: batchId,
+          userId: user.id,
+          batchType: 'job',
+          totalReceived: jsonItems.length,
+          metadata: { file_names: jsonItems.map((j) => j.name), mode: 'queued' },
+        });
+
+        for (const item of jsonItems) {
+          const safeName = sanitizeFileName(item.name);
+          const savedFileName = `${batchId}_${Date.now()}_${safeName}`;
+          const filePath = path.join(targetDir, savedFileName);
+
+          await fs.promises.writeFile(filePath, item.buffer);
+
+          const stat = await fs.promises.stat(filePath);
+          if (stat.size <= 0 || stat.size !== item.buffer.length) {
+            throw new Error(`File write verification failed for "${item.name}": saved size is ${stat.size} bytes, expected ${item.buffer.length} bytes.`);
+          }
+
+          await pool.query(
+            `INSERT INTO upload_queue (batch_id, user_id, position_id, file_name, file_path, file_type, status)
+             VALUES ($1, $2, $3, $4, $5, 'job', 'pending')`,
+            [batchId, user.id, item.positionId || null, savedFileName, filePath]
+          );
+        }
+
+        await updateBatchStatus(batchId, {
+          status: 'queued',
+          message: `${jsonItems.length} job file(s) saved and queued for background processing.`,
+        });
+
+        return NextResponse.json(
+          {
+            batch_id: batchId,
+            status: 'queued',
+            total_received: jsonItems.length,
+            message: 'Job descriptions uploaded and queued for background processing.',
+          },
+          { status: 202 }
+        );
+      }
 
       if (Array.isArray(body.job_descriptions) && body.job_descriptions.length > 0) {
         for (const item of body.job_descriptions) {

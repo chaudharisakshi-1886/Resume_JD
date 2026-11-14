@@ -397,12 +397,23 @@ export default function UploadJobDescriptionPage() {
           }
         }
 
+        // Read file bytes as base64 so queued mode receives the exact byte-for-byte binary file
+        const fileBuffer = await file.arrayBuffer();
+        let binary = '';
+        const bytes = new Uint8Array(fileBuffer);
+        const len = bytes.byteLength;
+        for (let i = 0; i < len; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        const fileBase64 = btoa(binary);
+
         jobDescriptionsPayload.push({
           position_id: extractedPosId,
           file_name: extracted.fileName,
           file_type: extracted.fileType,
           text: textVal,
-        });
+          base64: fileBase64,
+        } as any);
       }
 
       // Final pre-webhook validation check across all items:
