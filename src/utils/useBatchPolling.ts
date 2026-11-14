@@ -18,6 +18,7 @@ export interface UseBatchPollingOptions {
 export type UploadUiState =
   | 'idle'
   | 'initiating'
+  | 'queued'
   | 'processing'
   | 'completed'
   | 'completed_with_errors'
@@ -139,20 +140,21 @@ export function useBatchPolling(options: UseBatchPollingOptions = {}) {
 
         const currentStatus = data.status;
 
-        if (currentStatus === 'processing' || currentStatus === 'pending') {
+        if (currentStatus === 'processing' || currentStatus === 'pending' || currentStatus === 'queued') {
           attemptCountRef.current += 1;
 
           // Keep active upload registered to immunize session from idle timeout
           registerActiveUpload(batchId);
+          setBatchResult(data);
 
           if (attemptCountRef.current >= maxAttempts) {
             isPollingRef.current = false;
             setIsTimedOut(true);
-            setUiState('processing');
+            setUiState(currentStatus === 'queued' ? 'queued' : 'processing');
             return;
           }
 
-          setUiState('processing');
+          setUiState(currentStatus === 'queued' ? 'queued' : 'processing');
           isPollingRef.current = false;
           timerRef.current = setTimeout(() => pollBatchStatus(batchId), pollIntervalMs);
           return;

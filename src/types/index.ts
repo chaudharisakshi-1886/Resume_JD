@@ -189,7 +189,7 @@ export interface UploadRecordDetail {
   [key: string]: any;
 }
 
-export type BatchStatus = 'pending' | 'processing' | 'completed' | 'completed_with_errors' | 'failed';
+export type BatchStatus = 'queued' | 'pending' | 'processing' | 'completed' | 'completed_with_errors' | 'failed';
 
 export interface UploadBatchResponse {
   batch_id?: string;

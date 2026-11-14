@@ -3,7 +3,9 @@ import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/utils/auth';
 import { extractTextFromFile, isSupportedFormat, resolveFileType } from '@/utils/documentParser';
 import crypto from 'crypto';
-import { createBatch, processJobBatchAsync } from '@/services/batchService';
+import { createBatch, processJobBatchAsync, updateBatchStatus } from '@/services/batchService';
+import { saveFileToIncoming } from '@/lib/upload-storage';
+import { pool } from '@/database/db';
 import { UploadBatchResponse } from '@/types';
 
 interface JobDescriptionPayloadItem {
@@ -27,10 +29,12 @@ export async function POST(request: Request) {
     const contentType = request.headers.get('content-type') || '';
     const processedJDs: JobDescriptionPayloadItem[] = [];
     let customWebhookUrl: string | null = null;
+    const isQueuedMode = (process.env.UPLOAD_MODE || 'realtime').toLowerCase() === 'queued';
 
     if (contentType.includes('multipart/form-data')) {
       const formData = await request.formData();
       customWebhookUrl = (formData.get('webhook_url') as string) || (formData.get('webhookUrl') as string) || null;
+      const positionId = (formData.get('position_id') || formData.get('positionId') || formData.get('job_code') || formData.get('jobCode')) as string | null;
 
       // Collect all files from 'files' or 'file' keys in FormData
       const uploadedFiles: File[] = [];
@@ -49,6 +53,74 @@ export async function POST(request: Request) {
         return NextResponse.json(
           { error: 'No job description files or text provided. Please select at least one file.' },
           { status: 400 }
+        );
+      }
+
+      // If QUEUED MODE: Save JD files directly to incoming/jobs folder without real-time parsing
+      if (isQueuedMode) {
+        const filesToQueue: { name: string; buffer: Buffer }[] = [];
+        for (const file of uploadedFiles) {
+          if (!isSupportedFormat(file.name)) {
+            return NextResponse.json(
+              { error: `File "${file.name}" has an unsupported format. Supported formats: .pdf, .docx, .doc, .xlsx, .xls, .csv, .txt` },
+              { status: 400 }
+            );
+          }
+          filesToQueue.push({
+            name: file.name,
+            buffer: Buffer.from(await file.arrayBuffer()),
+          });
+        }
+
+        if (directText && directText.trim().length > 0) {
+          const directName = (formData.get('fileName') as string) || 'manual-job-description.txt';
+          filesToQueue.push({
+            name: directName,
+            buffer: Buffer.from(directText.trim(), 'utf-8'),
+          });
+        }
+
+        const batchId = `batch_job_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+
+        await createBatch({
+          id: batchId,
+          userId: user.id,
+          batchType: 'job',
+          totalReceived: filesToQueue.length,
+          metadata: {
+            file_names: filesToQueue.map((f) => f.name),
+            mode: 'queued',
+          },
+        });
+
+        for (const item of filesToQueue) {
+          const { filePath, safeFileName } = await saveFileToIncoming(
+            item.buffer,
+            item.name,
+            'job',
+            batchId
+          );
+
+          await pool.query(
+            `INSERT INTO upload_queue (batch_id, user_id, position_id, file_name, file_path, file_type, status)
+             VALUES ($1, $2, $3, $4, $5, 'job', 'pending')`,
+            [batchId, user.id, positionId || null, safeFileName, filePath]
+          );
+        }
+
+        await updateBatchStatus(batchId, {
+          status: 'queued',
+          message: `${filesToQueue.length} job file(s) saved and queued for background processing.`,
+        });
+
+        return NextResponse.json(
+          {
+            batch_id: batchId,
+            status: 'queued',
+            total_received: filesToQueue.length,
+            message: 'Job descriptions uploaded and queued for background processing.',
+          },
+          { status: 202 }
         );
       }
 

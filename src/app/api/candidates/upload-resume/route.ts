@@ -3,7 +3,9 @@ import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/utils/auth';
 import { extractTextFromFile, isSupportedFormat, resolveFileType } from '@/utils/documentParser';
 import crypto from 'crypto';
-import { createBatch, processCandidateBatchAsync } from '@/services/batchService';
+import { createBatch, processCandidateBatchAsync, updateBatchStatus } from '@/services/batchService';
+import { saveFileToIncoming } from '@/lib/upload-storage';
+import { pool } from '@/database/db';
 import { UploadBatchResponse } from '@/types';
 
 interface ResumePayloadItem {
@@ -24,9 +26,11 @@ export async function POST(request: Request) {
     const contentType = request.headers.get('content-type') || '';
     const processedResumes: ResumePayloadItem[] = [];
     let customWebhookUrl: string | null = null;
+    const isQueuedMode = (process.env.UPLOAD_MODE || 'realtime').toLowerCase() === 'queued';
 
     if (contentType.includes('multipart/form-data')) {
       const formData = await request.formData();
+      const positionId = (formData.get('position_id') || formData.get('positionId') || formData.get('jobId')) as string | null;
 
       // Collect all files from 'files' or 'file' keys in FormData
       const uploadedFiles: File[] = [];
@@ -45,6 +49,74 @@ export async function POST(request: Request) {
         return NextResponse.json(
           { error: 'No resume files or text provided. Please select at least one file.' },
           { status: 400 }
+        );
+      }
+
+      // If QUEUED MODE: Save files directly to incoming folder without real-time parsing
+      if (isQueuedMode) {
+        const filesToQueue: { name: string; buffer: Buffer }[] = [];
+        for (const file of uploadedFiles) {
+          if (!isSupportedFormat(file.name)) {
+            return NextResponse.json(
+              { error: `File "${file.name}" has an unsupported format. Supported formats: .pdf, .docx, .doc, .xlsx, .xls, .csv, .txt` },
+              { status: 400 }
+            );
+          }
+          filesToQueue.push({
+            name: file.name,
+            buffer: Buffer.from(await file.arrayBuffer()),
+          });
+        }
+
+        if (directText && directText.trim().length > 0) {
+          const directName = (formData.get('fileName') as string) || 'manual-resume.txt';
+          filesToQueue.push({
+            name: directName,
+            buffer: Buffer.from(directText.trim(), 'utf-8'),
+          });
+        }
+
+        const batchId = `batch_cand_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+
+        await createBatch({
+          id: batchId,
+          userId: user.id,
+          batchType: 'candidate',
+          totalReceived: filesToQueue.length,
+          metadata: {
+            file_names: filesToQueue.map((f) => f.name),
+            mode: 'queued',
+          },
+        });
+
+        for (const item of filesToQueue) {
+          const { filePath, safeFileName } = await saveFileToIncoming(
+            item.buffer,
+            item.name,
+            'candidate',
+            batchId
+          );
+
+          await pool.query(
+            `INSERT INTO upload_queue (batch_id, user_id, position_id, file_name, file_path, file_type, status)
+             VALUES ($1, $2, $3, $4, $5, 'candidate', 'pending')`,
+            [batchId, user.id, positionId || null, safeFileName, filePath]
+          );
+        }
+
+        await updateBatchStatus(batchId, {
+          status: 'queued',
+          message: `${filesToQueue.length} file(s) saved and queued for background processing.`,
+        });
+
+        return NextResponse.json(
+          {
+            batch_id: batchId,
+            status: 'queued',
+            total_received: filesToQueue.length,
+            message: 'Files uploaded and queued for background processing.',
+          },
+          { status: 202 }
         );
       }
 
@@ -115,6 +187,59 @@ export async function POST(request: Request) {
     } else if (contentType.includes('application/json')) {
       const body = await request.json();
       customWebhookUrl = body.webhook_url || body.webhookUrl || null;
+
+      if (isQueuedMode) {
+        const jsonItems: { name: string; text: string }[] = [];
+        if (Array.isArray(body.resumes) && body.resumes.length > 0) {
+          for (const item of body.resumes) {
+            if (item.text && typeof item.text === 'string' && item.text.trim().length > 0) {
+              jsonItems.push({ name: item.file_name || 'resume.txt', text: item.text.trim() });
+            }
+          }
+        } else if (body.text && typeof body.text === 'string' && body.text.trim().length > 0) {
+          jsonItems.push({ name: body.fileName || body.file_name || 'pasted-resume.txt', text: body.text.trim() });
+        }
+
+        if (jsonItems.length === 0) {
+          return NextResponse.json({ error: 'Please provide at least one resume with non-empty text.' }, { status: 400 });
+        }
+
+        const positionId = (body.position_id || body.positionId || body.jobId)?.toString() || null;
+        const batchId = `batch_cand_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+
+        await createBatch({
+          id: batchId,
+          userId: user.id,
+          batchType: 'candidate',
+          totalReceived: jsonItems.length,
+          metadata: { file_names: jsonItems.map((j) => j.name), mode: 'queued' },
+        });
+
+        for (const item of jsonItems) {
+          const buffer = Buffer.from(item.text, 'utf-8');
+          const { filePath, safeFileName } = await saveFileToIncoming(buffer, item.name, 'candidate', batchId);
+          await pool.query(
+            `INSERT INTO upload_queue (batch_id, user_id, position_id, file_name, file_path, file_type, status)
+             VALUES ($1, $2, $3, $4, $5, 'candidate', 'pending')`,
+            [batchId, user.id, positionId, safeFileName, filePath]
+          );
+        }
+
+        await updateBatchStatus(batchId, {
+          status: 'queued',
+          message: `${jsonItems.length} file(s) saved and queued for background processing.`,
+        });
+
+        return NextResponse.json(
+          {
+            batch_id: batchId,
+            status: 'queued',
+            total_received: jsonItems.length,
+            message: 'Files uploaded and queued for background processing.',
+          },
+          { status: 202 }
+        );
+      }
 
       if (Array.isArray(body.resumes) && body.resumes.length > 0) {
         for (const item of body.resumes) {
