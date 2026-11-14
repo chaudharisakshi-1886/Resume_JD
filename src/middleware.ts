@@ -59,7 +59,7 @@ function applyCorsHeaders(response: NextResponse, allowedOrigin: string): void {
     );
     response.headers.set(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, x-webhook-secret, x-n8n-secret, x-auth-token'
+      'Content-Type, Authorization, x-webhook-secret, x-n8n-secret, x-auth-token, x-secret'
     );
   }
 }
@@ -103,7 +103,8 @@ export async function middleware(request: NextRequest) {
     pathname.startsWith('/api/assessment/generate') ||
     pathname.startsWith('/api/assessment/submit') ||
     pathname.startsWith('/api/webhooks/') ||
-    pathname.startsWith('/api/cron/');
+    pathname.startsWith('/api/cron/') ||
+    pathname.startsWith('/api/internal/');
 
   const isAdminApi =
     pathname.startsWith('/api/team') ||

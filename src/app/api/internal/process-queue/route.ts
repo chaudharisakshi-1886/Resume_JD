@@ -12,8 +12,8 @@ let isQueueProcessing = false;
 export async function POST(request: Request) {
   try {
     // 1. Authorization check: header "x-secret" must equal CRON_SECRET
-    const providedSecret = request.headers.get('x-secret');
-    const expectedSecret = process.env.CRON_SECRET;
+    const providedSecret = (request.headers.get('x-secret') || '').trim();
+    const expectedSecret = (process.env.CRON_SECRET || '').trim();
 
     if (!expectedSecret || !providedSecret || providedSecret !== expectedSecret) {
       return NextResponse.json({ error: 'Forbidden: Invalid or missing secret' }, { status: 403 });
