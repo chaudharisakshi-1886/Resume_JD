@@ -3,8 +3,10 @@ import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/utils/auth';
 import { extractTextFromFile, isSupportedFormat, resolveFileType } from '@/utils/documentParser';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import { createBatch, processCandidateBatchAsync, updateBatchStatus } from '@/services/batchService';
-import { saveFileToIncoming } from '@/lib/upload-storage';
+import { sanitizeFileName } from '@/lib/upload-storage';
 import { pool } from '@/database/db';
 import { UploadBatchResponse } from '@/types';
 
@@ -38,7 +40,7 @@ export async function POST(request: Request) {
       const filesFromSingle = formData.getAll('file');
 
       for (const f of [...filesFromList, ...filesFromSingle]) {
-        if (f && typeof f === 'object' && 'arrayBuffer' in f && (f as File).size > 0) {
+        if (f && typeof f === 'object' && 'arrayBuffer' in f) {
           uploadedFiles.push(f as File);
         }
       }
@@ -52,9 +54,8 @@ export async function POST(request: Request) {
         );
       }
 
-      // If QUEUED MODE: Save files directly to incoming folder without real-time parsing
+      // If QUEUED MODE: Save original uploaded file bytes directly without text conversion or encoding
       if (isQueuedMode) {
-        const filesToQueue: { name: string; buffer: Buffer }[] = [];
         for (const file of uploadedFiles) {
           if (!isSupportedFormat(file.name)) {
             return NextResponse.json(
@@ -62,58 +63,72 @@ export async function POST(request: Request) {
               { status: 400 }
             );
           }
-          filesToQueue.push({
+        }
+
+        const batchId = `batch_cand_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        const uploadBaseDir = process.env.UPLOAD_DIR || 'E:/Srinivas/upload_resumes';
+        const targetDir = path.join(uploadBaseDir, 'incoming', 'candidates');
+        await fs.promises.mkdir(targetDir, { recursive: true });
+
+        const queuedFiles: { name: string; safeFileName: string; filePath: string }[] = [];
+
+        // Save original uploaded file bytes exactly: read with Buffer.from(await file.arrayBuffer()) and write with fs.promises.writeFile
+        for (const file of uploadedFiles) {
+          const fileBuffer = Buffer.from(await file.arrayBuffer());
+          const safeName = sanitizeFileName(file.name);
+          const savedFileName = `${batchId}_${Date.now()}_${safeName}`;
+          const filePath = path.join(targetDir, savedFileName);
+
+          await fs.promises.writeFile(filePath, fileBuffer);
+
+          queuedFiles.push({
             name: file.name,
-            buffer: Buffer.from(await file.arrayBuffer()),
+            safeFileName: savedFileName,
+            filePath,
           });
         }
 
         if (directText && directText.trim().length > 0) {
-          const directName = (formData.get('fileName') as string) || 'manual-resume.txt';
-          filesToQueue.push({
+          const directName = sanitizeFileName((formData.get('fileName') as string) || 'manual-resume.txt');
+          const savedFileName = `${batchId}_${Date.now()}_${directName}`;
+          const filePath = path.join(targetDir, savedFileName);
+          await fs.promises.writeFile(filePath, Buffer.from(directText.trim(), 'utf-8'));
+          queuedFiles.push({
             name: directName,
-            buffer: Buffer.from(directText.trim(), 'utf-8'),
+            safeFileName: savedFileName,
+            filePath,
           });
         }
-
-        const batchId = `batch_cand_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 
         await createBatch({
           id: batchId,
           userId: user.id,
           batchType: 'candidate',
-          totalReceived: filesToQueue.length,
+          totalReceived: queuedFiles.length,
           metadata: {
-            file_names: filesToQueue.map((f) => f.name),
+            file_names: queuedFiles.map((f) => f.name),
             mode: 'queued',
           },
         });
 
-        for (const item of filesToQueue) {
-          const { filePath, safeFileName } = await saveFileToIncoming(
-            item.buffer,
-            item.name,
-            'candidate',
-            batchId
-          );
-
+        for (const item of queuedFiles) {
           await pool.query(
             `INSERT INTO upload_queue (batch_id, user_id, position_id, file_name, file_path, file_type, status)
              VALUES ($1, $2, $3, $4, $5, 'candidate', 'pending')`,
-            [batchId, user.id, positionId || null, safeFileName, filePath]
+            [batchId, user.id, positionId || null, item.safeFileName, item.filePath]
           );
         }
 
         await updateBatchStatus(batchId, {
           status: 'queued',
-          message: `${filesToQueue.length} file(s) saved and queued for background processing.`,
+          message: `${queuedFiles.length} file(s) saved and queued for background processing.`,
         });
 
         return NextResponse.json(
           {
             batch_id: batchId,
             status: 'queued',
-            total_received: filesToQueue.length,
+            total_received: queuedFiles.length,
             message: 'Files uploaded and queued for background processing.',
           },
           { status: 202 }
@@ -189,23 +204,44 @@ export async function POST(request: Request) {
       customWebhookUrl = body.webhook_url || body.webhookUrl || null;
 
       if (isQueuedMode) {
-        const jsonItems: { name: string; text: string }[] = [];
+        const jsonItems: { name: string; buffer: Buffer }[] = [];
         if (Array.isArray(body.resumes) && body.resumes.length > 0) {
           for (const item of body.resumes) {
-            if (item.text && typeof item.text === 'string' && item.text.trim().length > 0) {
-              jsonItems.push({ name: item.file_name || 'resume.txt', text: item.text.trim() });
+            const rawBase64 = item.base64 || item.file_base64 || item.fileContent || item.file_content;
+            if (rawBase64 && typeof rawBase64 === 'string') {
+              jsonItems.push({
+                name: item.file_name || 'resume.bin',
+                buffer: Buffer.from(rawBase64, 'base64'),
+              });
+            } else if (item.text && typeof item.text === 'string' && item.text.trim().length > 0) {
+              const name = item.file_name || 'resume.txt';
+              const isBinaryDoc = /\.(pdf|docx?|xlsx?|csv)$/i.test(name);
+              if (isBinaryDoc) {
+                return NextResponse.json(
+                  { error: `Cannot save extracted text as binary file "${name}". Please upload original file via multipart/form-data.` },
+                  { status: 400 }
+                );
+              }
+              jsonItems.push({
+                name,
+                buffer: Buffer.from(item.text.trim(), 'utf-8'),
+              });
             }
           }
         } else if (body.text && typeof body.text === 'string' && body.text.trim().length > 0) {
-          jsonItems.push({ name: body.fileName || body.file_name || 'pasted-resume.txt', text: body.text.trim() });
+          const directName = body.fileName || body.file_name || 'pasted-resume.txt';
+          jsonItems.push({ name: directName, buffer: Buffer.from(body.text.trim(), 'utf-8') });
         }
 
         if (jsonItems.length === 0) {
-          return NextResponse.json({ error: 'Please provide at least one resume with non-empty text.' }, { status: 400 });
+          return NextResponse.json({ error: 'Please provide at least one resume with non-empty text or original file content.' }, { status: 400 });
         }
 
         const positionId = (body.position_id || body.positionId || body.jobId)?.toString() || null;
         const batchId = `batch_cand_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        const uploadBaseDir = process.env.UPLOAD_DIR || 'E:/Srinivas/upload_resumes';
+        const targetDir = path.join(uploadBaseDir, 'incoming', 'candidates');
+        await fs.promises.mkdir(targetDir, { recursive: true });
 
         await createBatch({
           id: batchId,
@@ -216,12 +252,16 @@ export async function POST(request: Request) {
         });
 
         for (const item of jsonItems) {
-          const buffer = Buffer.from(item.text, 'utf-8');
-          const { filePath, safeFileName } = await saveFileToIncoming(buffer, item.name, 'candidate', batchId);
+          const safeName = sanitizeFileName(item.name);
+          const savedFileName = `${batchId}_${Date.now()}_${safeName}`;
+          const filePath = path.join(targetDir, savedFileName);
+
+          await fs.promises.writeFile(filePath, item.buffer);
+
           await pool.query(
             `INSERT INTO upload_queue (batch_id, user_id, position_id, file_name, file_path, file_type, status)
              VALUES ($1, $2, $3, $4, $5, 'candidate', 'pending')`,
-            [batchId, user.id, positionId, safeFileName, filePath]
+            [batchId, user.id, positionId, savedFileName, filePath]
           );
         }
 
