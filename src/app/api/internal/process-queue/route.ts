@@ -202,7 +202,7 @@ export async function POST(request: Request) {
             callback_url: `${appBaseUrl}/api/webhooks/n8n/batch-complete`,
           };
 
-          // Dispatch to n8n
+          // Dispatch to n8n — no timeout; let the OS/network decide
           if (webhookUrl) {
             const webhookRes = await fetch(webhookUrl, {
               method: 'POST',
@@ -211,17 +211,21 @@ export async function POST(request: Request) {
                 'x-webhook-secret': n8nSecret,
               },
               body: JSON.stringify(payload),
-              signal: AbortSignal.timeout(25000),
               redirect: 'manual',
             });
 
             // 3xx redirects count as errors
             if (webhookRes.status >= 300 && webhookRes.status < 400) {
-              throw new Error(`n8n webhook returned redirect ${webhookRes.status}`);
+              const errBody = await webhookRes.text().catch(() => '');
+              throw new Error(
+                `n8n webhook returned redirect ${webhookRes.status}: ${errBody.slice(0, 500) || 'no body'}`
+              );
             }
             if (!webhookRes.ok) {
               const errBody = await webhookRes.text().catch(() => '');
-              throw new Error(`n8n webhook returned HTTP ${webhookRes.status}: ${errBody || 'Unknown error'}`);
+              throw new Error(
+                `n8n webhook returned HTTP ${webhookRes.status}: ${errBody.slice(0, 500) || 'Unknown error'}`
+              );
             }
           } else {
             console.warn(`[ProcessQueue] N8N_CANDIDATE_RESUME_WEBHOOK_URL is not set. Skipping webhook dispatch for "${safeName}".`);
