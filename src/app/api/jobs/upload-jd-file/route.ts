@@ -9,7 +9,6 @@ import fs from 'fs';
 import path from 'path';
 import { createBatch, processJobBatchAsync, updateBatchStatus } from '@/services/batchService';
 import { sanitizeFileName } from '@/lib/upload-storage';
-import { pool } from '@/database/db';
 import { UploadBatchResponse } from '@/types';
 
 interface JobDescriptionPayloadItem {
@@ -81,7 +80,7 @@ export async function POST(request: Request) {
         for (const file of uploadedFiles) {
           const buffer = Buffer.from(await file.arrayBuffer());
           const safeName = sanitizeFileName(file.name);
-          const savedFileName = `${batchId}_${Date.now()}_${safeName}`;
+          const savedFileName = `${user.id}__${batchId}__${safeName}`;
           const filePath = path.join(targetDir, savedFileName);
 
           await fs.promises.writeFile(filePath, buffer);
@@ -100,7 +99,7 @@ export async function POST(request: Request) {
 
         if (directText && directText.trim().length > 0) {
           const directName = sanitizeFileName((formData.get('fileName') as string) || 'manual-job-description.txt');
-          const savedFileName = `${batchId}_${Date.now()}_${directName}`;
+          const savedFileName = `${user.id}__${batchId}__${directName}`;
           const filePath = path.join(targetDir, savedFileName);
           const textBuffer = Buffer.from(directText.trim(), 'utf-8');
           await fs.promises.writeFile(filePath, textBuffer);
@@ -125,14 +124,6 @@ export async function POST(request: Request) {
             mode: 'queued',
           },
         });
-
-        for (const item of queuedFiles) {
-          await pool.query(
-            `INSERT INTO upload_queue (batch_id, user_id, position_id, file_name, file_path, file_type, status)
-             VALUES ($1, $2, $3, $4, $5, 'job', 'pending')`,
-            [batchId, user.id, positionId || null, item.safeFileName, item.filePath]
-          );
-        }
 
         await updateBatchStatus(batchId, {
           status: 'queued',
@@ -262,7 +253,7 @@ export async function POST(request: Request) {
 
         for (const item of jsonItems) {
           const safeName = sanitizeFileName(item.name);
-          const savedFileName = `${batchId}_${Date.now()}_${safeName}`;
+          const savedFileName = `${user.id}__${batchId}__${safeName}`;
           const filePath = path.join(targetDir, savedFileName);
 
           await fs.promises.writeFile(filePath, item.buffer);
@@ -271,12 +262,6 @@ export async function POST(request: Request) {
           if (stat.size <= 0 || stat.size !== item.buffer.length) {
             throw new Error(`File write verification failed for "${item.name}": saved size is ${stat.size} bytes, expected ${item.buffer.length} bytes.`);
           }
-
-          await pool.query(
-            `INSERT INTO upload_queue (batch_id, user_id, position_id, file_name, file_path, file_type, status)
-             VALUES ($1, $2, $3, $4, $5, 'job', 'pending')`,
-            [batchId, user.id, item.positionId || null, savedFileName, filePath]
-          );
         }
 
         await updateBatchStatus(batchId, {

@@ -4,11 +4,21 @@ import '@/utils/dns-fix';
 import fs from 'fs';
 import path from 'path';
 import { NextResponse } from 'next/server';
+import { pool } from '@/database/db';
 import { extractText } from '@/lib/resume-processing';
 import { updateBatchStatus } from '@/services/batchService';
 
 // In-process lock to prevent overlapping runs within the same instance
 let isQueueProcessing = false;
+
+// Supported file extensions for queue documents
+const SUPPORTED_EXTS = new Set(['.pdf', '.docx', '.doc', '.txt']);
+
+function isSupportedFile(fileName: string): boolean {
+  if (fileName.endsWith('.error.txt')) return false;
+  const ext = path.extname(fileName).toLowerCase();
+  return SUPPORTED_EXTS.has(ext);
+}
 
 // ---------------------------------------------------------------------------
 // Helper: move a file to processed/ or failed/, adding a timestamp suffix if
@@ -51,7 +61,10 @@ async function moveFileWithTimestamp(
 // Split on first two '__' only so safeName may itself contain '__'.
 // Falls back to ADMIN_USER_ID and a generated batchId when segments are missing.
 // ---------------------------------------------------------------------------
-function parseFileName(fileName: string): {
+function parseFileName(
+  fileName: string,
+  defaultBatchPrefix: 'batch_job_folder' | 'batch_cand_folder' = 'batch_cand_folder'
+): {
   userId: string;
   batchId: string;
   safeName: string;
@@ -59,19 +72,19 @@ function parseFileName(fileName: string): {
   const adminUserId = process.env.ADMIN_USER_ID || 'seeded-admin-user-id';
   const sep1 = fileName.indexOf('__');
   if (sep1 === -1) {
-    return { userId: adminUserId, batchId: `folder_${Date.now()}`, safeName: fileName };
+    return { userId: adminUserId, batchId: `${defaultBatchPrefix}_${Date.now()}`, safeName: fileName };
   }
   const sep2 = fileName.indexOf('__', sep1 + 2);
   if (sep2 === -1) {
     return {
       userId: fileName.slice(0, sep1) || adminUserId,
-      batchId: `folder_${Date.now()}`,
+      batchId: `${defaultBatchPrefix}_${Date.now()}`,
       safeName: fileName.slice(sep1 + 2) || fileName,
     };
   }
   return {
     userId: fileName.slice(0, sep1) || adminUserId,
-    batchId: fileName.slice(sep1 + 2, sep2),
+    batchId: fileName.slice(sep1 + 2, sep2) || `${defaultBatchPrefix}_${Date.now()}`,
     safeName: fileName.slice(sep2 + 2) || fileName,
   };
 }
@@ -79,8 +92,8 @@ function parseFileName(fileName: string): {
 // ---------------------------------------------------------------------------
 // POST /api/internal/process-queue
 // Protected by x-secret header matching CRON_SECRET.
-// Reads files from UPLOAD_DIR/incoming/candidates, dispatches each to the
-// n8n candidate resume webhook, then moves to processed/ or failed/.
+// Scans incoming/jobs BEFORE incoming/candidates so jobs exist before resumes.
+// Dispatches files to their respective n8n webhooks, then moves to processed/ or failed/.
 // ---------------------------------------------------------------------------
 export async function POST(request: Request) {
   try {
@@ -102,48 +115,61 @@ export async function POST(request: Request) {
 
     isQueueProcessing = true;
 
-    let processedCount = 0;
-    let failedCount = 0;
-    let skippedCount = 0;
+    // Track job metrics
+    let jobsFound = 0;
+    let jobsProcessed = 0;
+    let jobsFailed = 0;
+    let jobsSkipped = 0;
+
+    // Track resume metrics
+    let resumesFound = 0;
+    let resumesProcessed = 0;
+    let resumesFailed = 0;
+    let resumesSkipped = 0;
 
     try {
       const baseDir = (process.env.UPLOAD_DIR || 'E:/Srinivas/upload_resumes').replace(/\\/g, '/');
-      const incomingDir = path.join(baseDir, 'incoming', 'candidates');
+      const jobsIncomingDir = path.join(baseDir, 'incoming', 'jobs');
+      const candidatesIncomingDir = path.join(baseDir, 'incoming', 'candidates');
       const failedDir = path.join(baseDir, 'failed');
 
       // Ensure directories exist
-      await fs.promises.mkdir(incomingDir, { recursive: true });
+      await fs.promises.mkdir(jobsIncomingDir, { recursive: true });
+      await fs.promises.mkdir(candidatesIncomingDir, { recursive: true });
       await fs.promises.mkdir(failedDir, { recursive: true });
 
-      // 3. Read directory
-      let entries: string[];
-      try {
-        entries = await fs.promises.readdir(incomingDir);
-      } catch {
-        entries = [];
-      }
+      const n8nSecret = process.env.N8N_SHARED_SECRET || '';
+      const appBaseUrl = (process.env.APP_BASE_URL || 'http://localhost:3000').trim().replace(/\/+$/, '');
+      const callbackUrl = `${appBaseUrl}/api/webhooks/n8n/batch-complete`;
 
-      // Filter to files only (skip .error.txt, skip directories)
-      const fileNames = entries.filter((e) => !e.endsWith('.error.txt'));
+      const jobWebhookUrl = (
+        process.env.N8N_JD_WEBHOOK_URL ||
+        process.env.NEXT_PUBLIC_N8N_JD_WEBHOOK_URL ||
+        ''
+      ).trim();
 
-      if (fileNames.length === 0) {
-        return NextResponse.json({ message: 'No files in incoming/candidates folder.', processed: 0, failed: 0, skipped: 0 });
-      }
-
-      const webhookUrl = (
+      const candidateWebhookUrl = (
         process.env.N8N_CANDIDATE_RESUME_WEBHOOK_URL ||
         process.env.NEXT_PUBLIC_N8N_CANDIDATE_RESUME_WEBHOOK_URL ||
         ''
       ).trim();
 
-      const n8nSecret = process.env.N8N_SHARED_SECRET || '';
-      const appBaseUrl = (process.env.APP_BASE_URL || 'http://localhost:3000').trim();
+      // =====================================================================
+      // 3. Process JOB DESCRIPTIONS FIRST (resumes need their job to exist)
+      // =====================================================================
+      let jobEntries: string[] = [];
+      try {
+        jobEntries = await fs.promises.readdir(jobsIncomingDir);
+      } catch {
+        jobEntries = [];
+      }
 
-      // 4. Process each file one at a time
-      for (const fileName of fileNames) {
-        const filePath = path.join(incomingDir, fileName);
+      const jobFileNames = jobEntries.filter(isSupportedFile);
+      jobsFound = jobFileNames.length;
 
-        // Skip directories
+      for (const fileName of jobFileNames) {
+        const filePath = path.join(jobsIncomingDir, fileName);
+
         let stat: fs.Stats;
         try {
           stat = await fs.promises.stat(filePath);
@@ -152,14 +178,169 @@ export async function POST(request: Request) {
         }
         if (stat.isDirectory()) continue;
 
-        // Skip files modified in the last 60 seconds (may still be writing)
+        // Skip files modified in the last 60 seconds (may still be copying)
         if (Date.now() - stat.mtimeMs < 60_000) {
-          skippedCount++;
-          console.log(`[ProcessQueue] Skipping "${fileName}" — modified less than 60s ago.`);
+          jobsSkipped++;
+          console.log(`[ProcessQueue] Skipping job "${fileName}" — modified less than 60s ago.`);
           continue;
         }
 
-        const { userId, batchId, safeName } = parseFileName(fileName);
+        const { userId, batchId, safeName } = parseFileName(fileName, 'batch_job_folder');
+
+        try {
+          // Read buffer
+          const buffer = await fs.promises.readFile(filePath);
+
+          // Extract text using same extractText as realtime flow
+          const extracted = await extractText(buffer, safeName);
+          const rawText = (extracted.text || '').trim();
+
+          if (!rawText) {
+            throw new Error(`Failed to extract readable text from "${safeName}". File appears empty or corrupted.`);
+          }
+
+          // Extract position_id: from safeName (after user ID prefix removed) and from text
+          const codeMatch =
+            safeName.match(/(J\d{3,4}|ADM-\d{3}|[A-Z]{2,5}-\d{2,4})/i) ||
+            rawText.match(/(?:Job Code|Position ID|Req ID|Code)[\s:-]+([A-Z0-9-]+)/i);
+          const positionId = codeMatch ? codeMatch[1].trim() : null;
+
+          if (!positionId) {
+            throw new Error('position ID not found in job description');
+          }
+
+          // Check if position_id already exists in job_descriptions (case-insensitive)
+          const existingJob = await pool.query(
+            `SELECT id FROM job_descriptions WHERE lower(job_code) = lower($1) LIMIT 1`,
+            [positionId]
+          );
+
+          if (existingJob.rows.length > 0) {
+            throw new Error('job already exists');
+          }
+
+          // Update batch status to 'processing' only if batch record exists
+          try {
+            const batchCheck = await pool.query(
+              `SELECT id FROM upload_batches WHERE id = $1 LIMIT 1`,
+              [batchId]
+            );
+            if (batchCheck.rows.length > 0) {
+              await updateBatchStatus(batchId, {
+                status: 'processing',
+                message: `Processing job file "${safeName}"…`,
+              });
+            }
+          } catch (batchErr: any) {
+            console.warn(`[ProcessQueue] Could not update batch "${batchId}": ${batchErr.message}`);
+          }
+
+          // Build exact realtime job description payload shape
+          const payload = {
+            batch_id: batchId,
+            batchId,
+            user_id: userId,
+            userId,
+            created_by: userId,
+            createdBy: userId,
+            job_descriptions: [
+              {
+                position_id: positionId,
+                file_name: safeName,
+                file_type: extracted.fileType || 'application/pdf',
+                text: rawText,
+                wordCount: extracted.wordCount ?? rawText.split(/\s+/).filter(Boolean).length,
+                charCount: extracted.charCount ?? rawText.length,
+              },
+            ],
+            callback_url: callbackUrl,
+          };
+
+          // Dispatch to job n8n webhook — no timeout, redirect: 'manual'
+          if (jobWebhookUrl) {
+            const webhookRes = await fetch(jobWebhookUrl, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-webhook-secret': n8nSecret,
+              },
+              body: JSON.stringify(payload),
+              redirect: 'manual',
+            });
+
+            if (webhookRes.status >= 300 && webhookRes.status < 400) {
+              const errBody = await webhookRes.text().catch(() => '');
+              throw new Error(
+                `n8n webhook returned redirect ${webhookRes.status}: ${errBody.slice(0, 500) || 'no body'}`
+              );
+            }
+            if (!webhookRes.ok) {
+              const errBody = await webhookRes.text().catch(() => '');
+              throw new Error(
+                `n8n webhook returned HTTP ${webhookRes.status}: ${errBody.slice(0, 500) || 'Unknown error'}`
+              );
+            }
+          } else {
+            console.warn(`[ProcessQueue] N8N_JD_WEBHOOK_URL is not set. Skipping webhook dispatch for "${safeName}".`);
+          }
+
+          // 2xx -> move to processed/
+          await moveFileWithTimestamp(filePath, 'processed');
+          jobsProcessed++;
+          console.log(`[ProcessQueue] ✓ Processed job "${fileName}" → processed/`);
+        } catch (itemErr: any) {
+          console.error(`[ProcessQueue] ✗ Error processing job "${fileName}":`, itemErr.message);
+
+          // Move to failed/ and write error file
+          try {
+            await moveFileWithTimestamp(filePath, 'failed');
+          } catch (moveErr: any) {
+            console.error(`[ProcessQueue] Could not move "${fileName}" to failed/:`, moveErr.message);
+          }
+
+          const errorFilePath = path.join(failedDir, `${fileName}.error.txt`);
+          try {
+            await fs.promises.writeFile(errorFilePath, `${itemErr.message}\n`);
+          } catch (writeErr: any) {
+            console.error(`[ProcessQueue] Could not write error file for "${fileName}":`, writeErr.message);
+          }
+
+          jobsFailed++;
+        }
+      }
+
+      // =====================================================================
+      // 4. Process CANDIDATE RESUMES NEXT (runs even if jobs had errors)
+      // =====================================================================
+      let resumeEntries: string[] = [];
+      try {
+        resumeEntries = await fs.promises.readdir(candidatesIncomingDir);
+      } catch {
+        resumeEntries = [];
+      }
+
+      const candidateFileNames = resumeEntries.filter(isSupportedFile);
+      resumesFound = candidateFileNames.length;
+
+      for (const fileName of candidateFileNames) {
+        const filePath = path.join(candidatesIncomingDir, fileName);
+
+        let stat: fs.Stats;
+        try {
+          stat = await fs.promises.stat(filePath);
+        } catch {
+          continue;
+        }
+        if (stat.isDirectory()) continue;
+
+        // Skip files modified in the last 60 seconds (may still be copying)
+        if (Date.now() - stat.mtimeMs < 60_000) {
+          resumesSkipped++;
+          console.log(`[ProcessQueue] Skipping candidate "${fileName}" — modified less than 60s ago.`);
+          continue;
+        }
+
+        const { userId, batchId, safeName } = parseFileName(fileName, 'batch_cand_folder');
 
         try {
           // Read buffer
@@ -173,18 +354,23 @@ export async function POST(request: Request) {
             throw new Error(`Failed to extract readable text from "${safeName}". File appears empty or corrupted.`);
           }
 
-          // Mark batch as 'processing' (n8n batch-complete callback will set 'completed')
+          // Update batch status to 'processing' only if batch record exists
           try {
-            await updateBatchStatus(batchId, {
-              status: 'processing',
-              message: `Processing file "${safeName}"…`,
-            });
+            const batchCheck = await pool.query(
+              `SELECT id FROM upload_batches WHERE id = $1 LIMIT 1`,
+              [batchId]
+            );
+            if (batchCheck.rows.length > 0) {
+              await updateBatchStatus(batchId, {
+                status: 'processing',
+                message: `Processing file "${safeName}"…`,
+              });
+            }
           } catch (batchErr: any) {
-            // Batch may not exist for files dropped directly in the folder — log and continue
             console.warn(`[ProcessQueue] Could not update batch "${batchId}": ${batchErr.message}`);
           }
 
-          // Build n8n payload (same structure as processCandidateBatchAsync)
+          // Build candidate resume payload
           const payload = {
             batch_id: batchId,
             batchId,
@@ -199,12 +385,12 @@ export async function POST(request: Request) {
                 text: rawText,
               },
             ],
-            callback_url: `${appBaseUrl}/api/webhooks/n8n/batch-complete`,
+            callback_url: callbackUrl,
           };
 
-          // Dispatch to n8n — no timeout; let the OS/network decide
-          if (webhookUrl) {
-            const webhookRes = await fetch(webhookUrl, {
+          // Dispatch to candidate n8n webhook — no timeout, redirect: 'manual'
+          if (candidateWebhookUrl) {
+            const webhookRes = await fetch(candidateWebhookUrl, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -214,7 +400,6 @@ export async function POST(request: Request) {
               redirect: 'manual',
             });
 
-            // 3xx redirects count as errors
             if (webhookRes.status >= 300 && webhookRes.status < 400) {
               const errBody = await webhookRes.text().catch(() => '');
               throw new Error(
@@ -233,10 +418,10 @@ export async function POST(request: Request) {
 
           // Move to processed/
           await moveFileWithTimestamp(filePath, 'processed');
-          processedCount++;
-          console.log(`[ProcessQueue] ✓ Processed "${fileName}" → processed/`);
+          resumesProcessed++;
+          console.log(`[ProcessQueue] ✓ Processed resume "${fileName}" → processed/`);
         } catch (itemErr: any) {
-          console.error(`[ProcessQueue] ✗ Error processing "${fileName}":`, itemErr.message);
+          console.error(`[ProcessQueue] ✗ Error processing resume "${fileName}":`, itemErr.message);
 
           // Move to failed/ and write error file
           try {
@@ -247,23 +432,28 @@ export async function POST(request: Request) {
 
           const errorFilePath = path.join(failedDir, `${fileName}.error.txt`);
           try {
-            await fs.promises.writeFile(
-              errorFilePath,
-              `Error processing "${fileName}" at ${new Date().toISOString()}:\n${itemErr.message}\n`
-            );
+            await fs.promises.writeFile(errorFilePath, `${itemErr.message}\n`);
           } catch (writeErr: any) {
             console.error(`[ProcessQueue] Could not write error file for "${fileName}":`, writeErr.message);
           }
 
-          failedCount++;
+          resumesFailed++;
         }
       }
 
       return NextResponse.json({
-        processed: processedCount,
-        failed: failedCount,
-        skipped: skippedCount,
-        total_found: fileNames.length,
+        jobs: {
+          found: jobsFound,
+          processed: jobsProcessed,
+          failed: jobsFailed,
+          skipped: jobsSkipped,
+        },
+        resumes: {
+          found: resumesFound,
+          processed: resumesProcessed,
+          failed: resumesFailed,
+          skipped: resumesSkipped,
+        },
       });
     } finally {
       isQueueProcessing = false;
