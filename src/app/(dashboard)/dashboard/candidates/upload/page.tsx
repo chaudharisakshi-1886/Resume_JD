@@ -2,16 +2,16 @@
 
 import React, { useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { 
-  UploadCloud, 
-  CheckCircle2, 
-  AlertTriangle, 
+import {
+  UploadCloud,
+  CheckCircle2,
+  AlertTriangle,
   AlertCircle,
-  Loader2, 
-  FileText, 
-  ArrowLeft, 
-  Copy, 
-  Check, 
+  Loader2,
+  FileText,
+  ArrowLeft,
+  Copy,
+  Check,
   FileCode,
   Sparkles,
   X,
@@ -65,7 +65,7 @@ export default function UploadCandidateResumePage() {
     uiState,
   } = useBatchPolling({
     storageKey: 'active_candidate_upload_batch',
-    onCompleted: (result) => {
+    onCompleted: React.useCallback((result: UploadBatchStatusResponse) => {
       setUploadStage('completed');
       if (
         result.status === 'failed' ||
@@ -73,13 +73,18 @@ export default function UploadCandidateResumePage() {
       ) {
         setError(result.message || 'All candidate resumes failed to process.');
       }
-    },
-    onError: (err) => {
+    }, []),
+    onError: React.useCallback((err: string) => {
       setError(err);
-    },
+    }, []),
   });
 
-  const isProcessing = uploadStage === 'initiated' || uiState === 'processing';
+  const isProcessing =
+    uploadStage === 'initiated' ||
+    uploadStage === 'processing' ||
+    uiState === 'initiating' ||
+    uiState === 'processing' ||
+    uiState === 'queued';
 
 
   React.useEffect(() => {
@@ -349,11 +354,10 @@ export default function UploadCandidateResumePage() {
           onDragOver={handleDrag}
           onDrop={handleDrop}
           onClick={() => fileInputRef.current?.click()}
-          className={`relative border-2 border-dashed rounded-2xl p-8 sm:p-12 text-center transition-all cursor-pointer ${
-            dragActive
+          className={`relative border-2 border-dashed rounded-2xl p-8 sm:p-12 text-center transition-all cursor-pointer ${dragActive
               ? 'border-indigo-500 bg-indigo-50/50 scale-[1.005]'
               : 'border-neutral-300 hover:border-indigo-400 bg-white hover:bg-neutral-50/50'
-          }`}
+            }`}
         >
           <input
             ref={fileInputRef}
@@ -563,6 +567,8 @@ export default function UploadCandidateResumePage() {
               <p className="text-sm font-medium text-neutral-700">
                 {uploadStage === 'initiated'
                   ? 'Files uploaded. Sending to n8n for processing...'
+                  : uiState === 'queued'
+                  ? 'Resumes saved to processing queue. Awaiting cron execution...'
                   : 'Processing candidates, checking duplicates, and saving records to Supabase. Please wait...'}
               </p>
               <div className="w-full bg-indigo-100/70 rounded-full h-1.5 overflow-hidden mt-3">
@@ -601,28 +607,26 @@ export default function UploadCandidateResumePage() {
         <div className="space-y-5 animate-in fade-in duration-200">
           {/* 1. Header Banner based on results */}
           <div
-            className={`p-5 rounded-2xl border shadow-xs space-y-4 ${
-              batchResult.inserted_count > 0 && batchResult.duplicate_count === 0 && batchResult.failed_count === 0
+            className={`p-5 rounded-2xl border shadow-xs space-y-4 ${batchResult.inserted_count > 0 && batchResult.duplicate_count === 0 && batchResult.failed_count === 0
                 ? 'bg-emerald-50/70 border-emerald-200'
                 : batchResult.inserted_count === 0 && batchResult.duplicate_count > 0 && batchResult.failed_count === 0
-                ? 'bg-amber-50/70 border-amber-200'
-                : batchResult.inserted_count === 0 && batchResult.failed_count > 0
-                ? 'bg-red-50/70 border-red-200'
-                : 'bg-white border-neutral-200'
-            }`}
+                  ? 'bg-amber-50/70 border-amber-200'
+                  : batchResult.inserted_count === 0 && batchResult.failed_count > 0
+                    ? 'bg-red-50/70 border-red-200'
+                    : 'bg-white border-neutral-200'
+              }`}
           >
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="flex items-start gap-3.5">
                 <div
-                  className={`p-2.5 rounded-xl mt-0.5 shrink-0 ${
-                    batchResult.inserted_count > 0 && batchResult.duplicate_count === 0 && batchResult.failed_count === 0
+                  className={`p-2.5 rounded-xl mt-0.5 shrink-0 ${batchResult.inserted_count > 0 && batchResult.duplicate_count === 0 && batchResult.failed_count === 0
                       ? 'bg-emerald-100 text-emerald-700'
                       : batchResult.inserted_count === 0 && batchResult.duplicate_count > 0 && batchResult.failed_count === 0
-                      ? 'bg-amber-100 text-amber-700'
-                      : batchResult.inserted_count === 0 && batchResult.failed_count > 0
-                      ? 'bg-red-100 text-red-700'
-                      : 'bg-indigo-100 text-indigo-700'
-                  }`}
+                        ? 'bg-amber-100 text-amber-700'
+                        : batchResult.inserted_count === 0 && batchResult.failed_count > 0
+                          ? 'bg-red-100 text-red-700'
+                          : 'bg-indigo-100 text-indigo-700'
+                    }`}
                 >
                   {batchResult.inserted_count > 0 && batchResult.duplicate_count === 0 && batchResult.failed_count === 0 ? (
                     <CheckCircle2 className="h-6 w-6" />
@@ -640,10 +644,10 @@ export default function UploadCandidateResumePage() {
                       {batchResult.inserted_count > 0 && batchResult.duplicate_count === 0 && batchResult.failed_count === 0
                         ? 'All Candidate Resumes Inserted Successfully'
                         : batchResult.inserted_count === 0 && batchResult.duplicate_count > 0 && batchResult.failed_count === 0
-                        ? 'Duplicate Candidate Resumes Found'
-                        : batchResult.inserted_count === 0 && batchResult.failed_count > 0
-                        ? 'Candidate Resume Upload Failed'
-                        : 'Upload Results Summary'}
+                          ? 'Duplicate Candidate Resumes Found'
+                          : batchResult.inserted_count === 0 && batchResult.failed_count > 0
+                            ? 'Candidate Resume Upload Failed'
+                            : 'Upload Results Summary'}
                     </span>
                     <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-neutral-100 text-neutral-700 border border-neutral-200">
                       {batchResult.total_received} Total Received
@@ -711,144 +715,144 @@ export default function UploadCandidateResumePage() {
           {/* A. Successfully Inserted Records */}
           {((batchResult.inserted_candidates && batchResult.inserted_candidates.length > 0) ||
             (batchResult.inserted_records && batchResult.inserted_records.length > 0)) && (
-            <div className="bg-white rounded-xl border border-neutral-200 p-5 shadow-xs space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold uppercase tracking-wider text-emerald-800 flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                  <span>
-                    Successfully Inserted (
-                    {(batchResult.inserted_candidates || batchResult.inserted_records || []).length}
-                    )
+              <div className="bg-white rounded-xl border border-neutral-200 p-5 shadow-xs space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold uppercase tracking-wider text-emerald-800 flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                    <span>
+                      Successfully Inserted (
+                      {(batchResult.inserted_candidates || batchResult.inserted_records || []).length}
+                      )
+                    </span>
                   </span>
-                </span>
-                <span className="text-[11px] text-neutral-400">Added to database</span>
-              </div>
-              <div className="space-y-2">
-                {(batchResult.inserted_candidates || batchResult.inserted_records || []).map((item, idx) => {
-                  const isExpanded = expandedFileIdx === idx;
-                  return (
-                    <div key={`inserted-${item.file_name}-${idx}`} className="border border-neutral-200 rounded-lg overflow-hidden">
-                      <div className="p-3.5 bg-neutral-50 flex items-center justify-between text-xs">
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <span className="font-mono text-neutral-400 text-[11px] w-5">#{idx + 1}</span>
-                          <User className="h-4 w-4 text-emerald-600 shrink-0" />
-                          <span className="font-semibold text-neutral-900 truncate max-w-xs sm:max-w-md">
-                            {item.candidate_name || item.file_name}
-                          </span>
-                          {item.candidate_email && item.candidate_email !== 'Email not detected' && item.candidate_email !== 'N/A' && (
-                            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold shrink-0">
-                              {item.candidate_email}
+                  <span className="text-[11px] text-neutral-400">Added to database</span>
+                </div>
+                <div className="space-y-2">
+                  {(batchResult.inserted_candidates || batchResult.inserted_records || []).map((item, idx) => {
+                    const isExpanded = expandedFileIdx === idx;
+                    return (
+                      <div key={`inserted-${item.file_name}-${idx}`} className="border border-neutral-200 rounded-lg overflow-hidden">
+                        <div className="p-3.5 bg-neutral-50 flex items-center justify-between text-xs">
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <span className="font-mono text-neutral-400 text-[11px] w-5">#{idx + 1}</span>
+                            <User className="h-4 w-4 text-emerald-600 shrink-0" />
+                            <span className="font-semibold text-neutral-900 truncate max-w-xs sm:max-w-md">
+                              {item.candidate_name || item.file_name}
                             </span>
-                          )}
-                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 shrink-0">
-                            Inserted
-                          </span>
-                        </div>
+                            {item.candidate_email && item.candidate_email !== 'Email not detected' && item.candidate_email !== 'N/A' && (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold shrink-0">
+                                {item.candidate_email}
+                              </span>
+                            )}
+                            <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 shrink-0">
+                              Inserted
+                            </span>
+                          </div>
 
-                        <div className="flex items-center gap-2 shrink-0">
-                          {item.text && (
-                            <button
-                              type="button"
-                              onClick={() => setExpandedFileIdx(isExpanded ? null : idx)}
-                              className="p-1 text-neutral-500 hover:text-neutral-900 text-xs font-semibold flex items-center gap-1 cursor-pointer"
-                            >
-                              <span>{isExpanded ? 'Hide Text' : 'View Text'}</span>
-                              {isExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-
-                      {isExpanded && item.text && (
-                        <div className="p-4 bg-white border-t border-neutral-200 space-y-2">
-                          <div className="p-3 bg-neutral-50 rounded border border-neutral-200 max-h-56 overflow-y-auto font-mono text-xs text-neutral-800 leading-relaxed whitespace-pre-wrap select-all">
-                            {item.text}
+                          <div className="flex items-center gap-2 shrink-0">
+                            {item.text && (
+                              <button
+                                type="button"
+                                onClick={() => setExpandedFileIdx(isExpanded ? null : idx)}
+                                className="p-1 text-neutral-500 hover:text-neutral-900 text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                              >
+                                <span>{isExpanded ? 'Hide Text' : 'View Text'}</span>
+                                {isExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                              </button>
+                            )}
                           </div>
                         </div>
-                      )}
-                    </div>
-                  );
-                })}
+
+                        {isExpanded && item.text && (
+                          <div className="p-4 bg-white border-t border-neutral-200 space-y-2">
+                            <div className="p-3 bg-neutral-50 rounded border border-neutral-200 max-h-56 overflow-y-auto font-mono text-xs text-neutral-800 leading-relaxed whitespace-pre-wrap select-all">
+                              {item.text}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
           {/* B. Duplicate Skipped Records */}
           {((batchResult.duplicate_candidates && batchResult.duplicate_candidates.length > 0) ||
             (batchResult.duplicate_records && batchResult.duplicate_records.length > 0)) && (
-            <div className="bg-white rounded-xl border border-amber-200 p-5 shadow-xs space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold uppercase tracking-wider text-amber-800 flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-amber-500"></span>
-                  <span>
-                    Duplicate Records Skipped (
-                    {(batchResult.duplicate_candidates || batchResult.duplicate_records || []).length}
-                    )
+              <div className="bg-white rounded-xl border border-amber-200 p-5 shadow-xs space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold uppercase tracking-wider text-amber-800 flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-amber-500"></span>
+                    <span>
+                      Duplicate Records Skipped (
+                      {(batchResult.duplicate_candidates || batchResult.duplicate_records || []).length}
+                      )
+                    </span>
                   </span>
-                </span>
-                <span className="text-[11px] text-amber-600 font-medium">Already exists in Supabase</span>
-              </div>
-              <div className="space-y-2">
-                {(batchResult.duplicate_candidates || batchResult.duplicate_records || []).map((item, idx) => (
-                  <div key={`dup-${item.file_name}-${idx}`} className="border border-amber-200 rounded-lg p-3.5 bg-amber-50/40 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
-                      <span className="font-semibold text-neutral-900 truncate max-w-xs sm:max-w-md">
-                        {item.candidate_name || item.file_name}
-                      </span>
-                      {item.candidate_email && item.candidate_email !== 'N/A' && (
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-100 text-amber-800 font-bold shrink-0">
-                          {item.candidate_email}
+                  <span className="text-[11px] text-amber-600 font-medium">Already exists in Supabase</span>
+                </div>
+                <div className="space-y-2">
+                  {(batchResult.duplicate_candidates || batchResult.duplicate_records || []).map((item, idx) => (
+                    <div key={`dup-${item.file_name}-${idx}`} className="border border-amber-200 rounded-lg p-3.5 bg-amber-50/40 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+                        <span className="font-semibold text-neutral-900 truncate max-w-xs sm:max-w-md">
+                          {item.candidate_name || item.file_name}
                         </span>
-                      )}
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300 shrink-0">
-                        Duplicate Skipped
+                        {item.candidate_email && item.candidate_email !== 'N/A' && (
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-100 text-amber-800 font-bold shrink-0">
+                            {item.candidate_email}
+                          </span>
+                        )}
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300 shrink-0">
+                          Duplicate Skipped
+                        </span>
+                      </div>
+                      <span className="text-xs text-amber-700 italic shrink-0">
+                        {item.reason || 'Candidate record already present in Supabase.'}
                       </span>
                     </div>
-                    <span className="text-xs text-amber-700 italic shrink-0">
-                      {item.reason || 'Candidate record already present in Supabase.'}
-                    </span>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
           {/* C. Failed Records */}
           {((batchResult.failed_candidates && batchResult.failed_candidates.length > 0) ||
             (batchResult.failed_records && batchResult.failed_records.length > 0)) && (
-            <div className="bg-white rounded-xl border border-red-200 p-5 shadow-xs space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold uppercase tracking-wider text-red-800 flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-red-500"></span>
-                  <span>
-                    Failed Records (
-                    {(batchResult.failed_candidates || batchResult.failed_records || []).length}
-                    )
+              <div className="bg-white rounded-xl border border-red-200 p-5 shadow-xs space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold uppercase tracking-wider text-red-800 flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-red-500"></span>
+                    <span>
+                      Failed Records (
+                      {(batchResult.failed_candidates || batchResult.failed_records || []).length}
+                      )
+                    </span>
                   </span>
-                </span>
-                <span className="text-[11px] text-red-600 font-medium">Action required</span>
-              </div>
-              <div className="space-y-2">
-                {(batchResult.failed_candidates || batchResult.failed_records || []).map((item, idx) => (
-                  <div key={`failed-${item.file_name}-${idx}`} className="border border-red-200 rounded-lg p-3.5 bg-red-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <AlertCircle className="h-4 w-4 text-red-600 shrink-0" />
-                      <span className="font-semibold text-neutral-900 truncate max-w-xs sm:max-w-md">
-                        {item.file_name || 'Candidate Resume Document'}
-                      </span>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-red-100 text-red-800 border border-red-300 shrink-0">
-                        Failed
+                  <span className="text-[11px] text-red-600 font-medium">Action required</span>
+                </div>
+                <div className="space-y-2">
+                  {(batchResult.failed_candidates || batchResult.failed_records || []).map((item, idx) => (
+                    <div key={`failed-${item.file_name}-${idx}`} className="border border-red-200 rounded-lg p-3.5 bg-red-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <AlertCircle className="h-4 w-4 text-red-600 shrink-0" />
+                        <span className="font-semibold text-neutral-900 truncate max-w-xs sm:max-w-md">
+                          {item.file_name || 'Candidate Resume Document'}
+                        </span>
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-red-100 text-red-800 border border-red-300 shrink-0">
+                          Failed
+                        </span>
+                      </div>
+                      <span className="text-xs text-red-700 font-medium shrink-0">
+                        {item.error || 'Failed to process resume.'}
                       </span>
                     </div>
-                    <span className="text-xs text-red-700 font-medium shrink-0">
-                      {item.error || 'Failed to process resume.'}
-                    </span>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
           {/* 3. Action Footer / Directory Link */}
           {batchResult.inserted_count > 0 && (
