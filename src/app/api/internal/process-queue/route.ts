@@ -325,8 +325,7 @@ export async function POST(request: Request) {
         `SELECT id, batch_id, user_id, file_name, file_type, resume_text, callback_url
            FROM resume_queue
           WHERE status = 'incoming'
-          ORDER BY created_at
-          LIMIT 50`
+          ORDER BY created_at`
       );
 
       const rows = incomingResult.rows;
