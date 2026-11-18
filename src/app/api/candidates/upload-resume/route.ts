@@ -5,11 +5,8 @@ import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/utils/auth';
 import { extractTextFromFile, isSupportedFormat, resolveFileType } from '@/utils/documentParser';
 import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
+import { pool } from '@/database/db';
 import { createBatch, processCandidateBatchAsync, updateBatchStatus } from '@/services/batchService';
-import { sanitizeFileName } from '@/lib/upload-storage';
-import { UploadBatchResponse } from '@/types';
 
 interface ResumePayloadItem {
   file_name: string;
@@ -33,7 +30,6 @@ export async function POST(request: Request) {
 
     if (contentType.includes('multipart/form-data')) {
       const formData = await request.formData();
-      const positionId = (formData.get('position_id') || formData.get('positionId') || formData.get('jobId')) as string | null;
 
       // Collect all files from 'files' or 'file' keys in FormData
       const uploadedFiles: File[] = [];
@@ -55,7 +51,10 @@ export async function POST(request: Request) {
         );
       }
 
-      // If QUEUED MODE: Save original uploaded file bytes directly without text conversion or encoding
+      // -----------------------------------------------------------------------
+      // QUEUED MODE: Extract text server-side, insert into resume_queue table.
+      // No files are written to disk.
+      // -----------------------------------------------------------------------
       if (isQueuedMode) {
         for (const file of uploadedFiles) {
           if (!isSupportedFormat(file.name)) {
@@ -67,78 +66,115 @@ export async function POST(request: Request) {
         }
 
         const batchId = `batch_cand_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-        const uploadBaseDir = process.env.UPLOAD_DIR || 'E:/Srinivas/upload_resumes';
-        const targetDir = path.join(uploadBaseDir, 'incoming', 'candidates');
-        await fs.promises.mkdir(targetDir, { recursive: true });
+        const appBaseUrl = (process.env.APP_BASE_URL || 'http://localhost:3000').trim().replace(/\/+$/, '');
+        const callbackUrl = `${appBaseUrl}/api/webhooks/n8n/batch-complete`;
 
-        const queuedFiles: { name: string; safeFileName: string; filePath: string }[] = [];
+        // Items to insert into resume_queue
+        const queueRows: { fileName: string; fileType: string; text: string }[] = [];
 
-        // Save original uploaded file bytes exactly: read with Buffer.from(await file.arrayBuffer()) and write with fs.promises.writeFile
+        // Extract text from each uploaded file server-side
         for (const file of uploadedFiles) {
           const buffer = Buffer.from(await file.arrayBuffer());
-          const safeName = sanitizeFileName(file.name);
-          const savedFileName = `${user.id}__${batchId}__${safeName}`;
-          const filePath = path.join(targetDir, savedFileName);
-
-          await fs.promises.writeFile(filePath, buffer);
-
-          const stat = await fs.promises.stat(filePath);
-          if (stat.size <= 0 || stat.size !== buffer.length) {
-            throw new Error(`File write verification failed for "${file.name}": saved size is ${stat.size} bytes, expected ${buffer.length} bytes.`);
+          let extracted;
+          try {
+            extracted = await extractTextFromFile(buffer, file.name, file.type);
+          } catch (err: any) {
+            return NextResponse.json(
+              { error: `Failed to extract text from "${file.name}": ${err.message}` },
+              { status: 400 }
+            );
           }
 
-          queuedFiles.push({
-            name: file.name,
-            safeFileName: savedFileName,
-            filePath,
+          const rawText = (extracted.text || '').trim();
+
+          const isPdf = file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf';
+          if (
+            !rawText ||
+            (isPdf &&
+              (rawText.startsWith('%PDF-') ||
+                /\b(?:xref|endobj|%%EOF)\b/.test(rawText) ||
+                rawText.includes('%PDF-')))
+          ) {
+            return NextResponse.json(
+              {
+                error: isPdf
+                  ? `PDF text extraction failed for "${file.name}".`
+                  : `Failed to extract text from "${file.name}". The document appears empty or unreadable.`,
+              },
+              { status: 400 }
+            );
+          }
+
+          queueRows.push({
+            fileName: file.name,
+            fileType: resolveFileType(file.name, file.type),
+            text: rawText,
           });
         }
 
+        // Handle pasted/direct text
         if (directText && directText.trim().length > 0) {
-          const directName = sanitizeFileName((formData.get('fileName') as string) || 'manual-resume.txt');
-          const savedFileName = `${user.id}__${batchId}__${directName}`;
-          const filePath = path.join(targetDir, savedFileName);
-          const textBuffer = Buffer.from(directText.trim(), 'utf-8');
-          await fs.promises.writeFile(filePath, textBuffer);
-          const stat = await fs.promises.stat(filePath);
-          if (stat.size <= 0 || stat.size !== textBuffer.length) {
-            throw new Error(`File write verification failed for "${directName}": saved size is ${stat.size} bytes, expected ${textBuffer.length} bytes.`);
-          }
-          queuedFiles.push({
-            name: directName,
-            safeFileName: savedFileName,
-            filePath,
+          const textVal = directText.trim();
+          const directName = (formData.get('fileName') as string) || 'manual-resume.txt';
+          queueRows.push({
+            fileName: directName,
+            fileType: 'text/plain',
+            text: textVal,
           });
         }
 
+        if (queueRows.length === 0) {
+          return NextResponse.json(
+            { error: 'No valid resumes found to queue.' },
+            { status: 400 }
+          );
+        }
+
+        // Create upload_batches row (status will be set to 'queued' below)
         await createBatch({
           id: batchId,
           userId: user.id,
           batchType: 'candidate',
-          totalReceived: queuedFiles.length,
+          totalReceived: queueRows.length,
           metadata: {
-            file_names: queuedFiles.map((f) => f.name),
+            file_names: queueRows.map((r) => r.fileName),
             mode: 'queued',
           },
         });
 
+        // Insert one row per resume into resume_queue
+        for (const row of queueRows) {
+          await pool.query(
+            `INSERT INTO resume_queue
+               (batch_id, user_id, file_name, file_type, resume_text, callback_url, status)
+             VALUES ($1, $2, $3, $4, $5, $6, 'incoming')`,
+            [batchId, user.id, row.fileName, row.fileType, row.text, callbackUrl]
+          );
+        }
+
         await updateBatchStatus(batchId, {
           status: 'queued',
-          message: `${queuedFiles.length} file(s) saved and queued for background processing.`,
+          message: `${queueRows.length} file(s) queued for background processing.`,
         });
+
+        console.log(
+          `[Candidate Upload] Batch "${batchId}" queued — ${queueRows.length} row(s) inserted into resume_queue.`
+        );
 
         return NextResponse.json(
           {
             batch_id: batchId,
             status: 'queued',
-            total_received: queuedFiles.length,
+            total_received: queueRows.length,
             message: 'Files uploaded and queued for background processing.',
           },
           { status: 202 }
         );
       }
 
-      // Process each file in the order uploaded
+      // -----------------------------------------------------------------------
+      // REALTIME MODE: Extract text and send directly to n8n (unchanged).
+      // -----------------------------------------------------------------------
       for (const file of uploadedFiles) {
         if (!isSupportedFormat(file.name)) {
           return NextResponse.json(
@@ -206,66 +242,73 @@ export async function POST(request: Request) {
       const body = await request.json();
       customWebhookUrl = body.webhook_url || body.webhookUrl || null;
 
+      // JSON + queued mode: treat text fields directly (no base64/disk)
       if (isQueuedMode) {
-        const jsonItems: { name: string; buffer: Buffer }[] = [];
+        const batchId = `batch_cand_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        const appBaseUrl = (process.env.APP_BASE_URL || 'http://localhost:3000').trim().replace(/\/+$/, '');
+        const callbackUrl = `${appBaseUrl}/api/webhooks/n8n/batch-complete`;
+
+        const queueRows: { fileName: string; fileType: string; text: string }[] = [];
+
         if (Array.isArray(body.resumes) && body.resumes.length > 0) {
           for (const item of body.resumes) {
-            const rawData = item.base64 || item.file_base64 || item.fileContent || item.data || item.text;
-            if (rawData && typeof rawData === 'string') {
-              const cleanBase64 = rawData.replace(/^data:[^;]+;base64,/, '').trim();
-              const buffer = Buffer.from(cleanBase64, 'base64');
-              jsonItems.push({
-                name: item.file_name || 'resume.pdf',
-                buffer,
-              });
+            const textVal = (item.text || '').trim();
+            if (!textVal) {
+              return NextResponse.json(
+                { error: `Item "${item.file_name || 'unnamed'}" does not contain valid text.` },
+                { status: 400 }
+              );
             }
+            const fileName = item.file_name || 'resume.txt';
+            queueRows.push({
+              fileName,
+              fileType: item.file_type || resolveFileType(fileName),
+              text: textVal,
+            });
           }
         } else if (body.text && typeof body.text === 'string' && body.text.trim().length > 0) {
-          const directName = body.fileName || body.file_name || 'pasted-resume.txt';
-          jsonItems.push({ name: directName, buffer: Buffer.from(body.text.trim(), 'utf-8') });
+          const fileName = body.fileName || body.file_name || 'pasted-resume.txt';
+          queueRows.push({
+            fileName,
+            fileType: resolveFileType(fileName),
+            text: body.text.trim(),
+          });
         }
 
-        if (jsonItems.length === 0) {
-          return NextResponse.json({ error: 'Please provide at least one resume with non-empty content.' }, { status: 400 });
+        if (queueRows.length === 0) {
+          return NextResponse.json(
+            { error: 'Please provide at least one resume with non-empty content.' },
+            { status: 400 }
+          );
         }
-
-        const positionId = (body.position_id || body.positionId || body.jobId)?.toString() || null;
-        const batchId = `batch_cand_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-        const uploadBaseDir = process.env.UPLOAD_DIR || 'E:/Srinivas/upload_resumes';
-        const targetDir = path.join(uploadBaseDir, 'incoming', 'candidates');
-        await fs.promises.mkdir(targetDir, { recursive: true });
 
         await createBatch({
           id: batchId,
           userId: user.id,
           batchType: 'candidate',
-          totalReceived: jsonItems.length,
-          metadata: { file_names: jsonItems.map((j) => j.name), mode: 'queued' },
+          totalReceived: queueRows.length,
+          metadata: { file_names: queueRows.map((r) => r.fileName), mode: 'queued' },
         });
 
-        for (const item of jsonItems) {
-          const safeName = sanitizeFileName(item.name);
-          const savedFileName = `${user.id}__${batchId}__${safeName}`;
-          const filePath = path.join(targetDir, savedFileName);
-
-          await fs.promises.writeFile(filePath, item.buffer);
-
-          const stat = await fs.promises.stat(filePath);
-          if (stat.size <= 0 || stat.size !== item.buffer.length) {
-            throw new Error(`File write verification failed for "${item.name}": saved size is ${stat.size} bytes, expected ${item.buffer.length} bytes.`);
-          }
+        for (const row of queueRows) {
+          await pool.query(
+            `INSERT INTO resume_queue
+               (batch_id, user_id, file_name, file_type, resume_text, callback_url, status)
+             VALUES ($1, $2, $3, $4, $5, $6, 'incoming')`,
+            [batchId, user.id, row.fileName, row.fileType, row.text, callbackUrl]
+          );
         }
 
         await updateBatchStatus(batchId, {
           status: 'queued',
-          message: `${jsonItems.length} file(s) saved and queued for background processing.`,
+          message: `${queueRows.length} file(s) queued for background processing.`,
         });
 
         return NextResponse.json(
           {
             batch_id: batchId,
             status: 'queued',
-            total_received: jsonItems.length,
+            total_received: queueRows.length,
             message: 'Files uploaded and queued for background processing.',
           },
           { status: 202 }
@@ -320,16 +363,7 @@ export async function POST(request: Request) {
       );
     }
 
-    // Required Resume Webhook Payload structure:
-    const webhookPayload = {
-      resumes: processedResumes.map((r) => ({
-        file_name: r.file_name,
-        file_type: r.file_type,
-        text: r.text,
-      })),
-    };
-
-    // Determine target webhook URL for Candidate Resume
+    // Determine target webhook URL for Candidate Resume (realtime mode)
     const customHeaderUrl = request.headers.get('x-webhook-url');
     const webhookUrl =
       (customWebhookUrl && customWebhookUrl.trim()) ||
@@ -344,7 +378,7 @@ export async function POST(request: Request) {
     const batchId = `batch_cand_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 
     // Register batch in Supabase upload_batches table
-    const batch = await createBatch({
+    await createBatch({
       id: batchId,
       userId: user.id,
       batchType: 'candidate',
@@ -367,7 +401,7 @@ export async function POST(request: Request) {
       );
     });
 
-    // Return accepted response with batch_id and processing status (never fabricated success counts)
+    // Return accepted response with batch_id and processing status
     return NextResponse.json(
       {
         batch_id: batchId,

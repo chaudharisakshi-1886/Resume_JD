@@ -11,7 +11,7 @@ import { updateBatchStatus } from '@/services/batchService';
 // In-process lock to prevent overlapping runs within the same instance
 let isQueueProcessing = false;
 
-// Supported file extensions for queue documents
+// Supported file extensions for queue documents (jobs folder only now)
 const SUPPORTED_EXTS = new Set(['.pdf', '.docx', '.doc', '.txt']);
 
 function isSupportedFile(fileName: string): boolean {
@@ -92,8 +92,8 @@ function parseFileName(
 // ---------------------------------------------------------------------------
 // POST /api/internal/process-queue
 // Protected by x-secret header matching CRON_SECRET.
-// Scans incoming/jobs BEFORE incoming/candidates so jobs exist before resumes.
-// Dispatches files to their respective n8n webhooks, then moves to processed/ or failed/.
+// Jobs: scans incoming/jobs folder (unchanged).
+// Resumes: reads from resume_queue DB table (status = 'incoming').
 // ---------------------------------------------------------------------------
 export async function POST(request: Request) {
   try {
@@ -125,17 +125,14 @@ export async function POST(request: Request) {
     let resumesFound = 0;
     let resumesProcessed = 0;
     let resumesFailed = 0;
-    let resumesSkipped = 0;
 
     try {
       const baseDir = (process.env.UPLOAD_DIR || 'E:/Srinivas/upload_resumes').replace(/\\/g, '/');
       const jobsIncomingDir = path.join(baseDir, 'incoming', 'jobs');
-      const candidatesIncomingDir = path.join(baseDir, 'incoming', 'candidates');
       const failedDir = path.join(baseDir, 'failed');
 
-      // Ensure directories exist
+      // Ensure job directories exist (candidate dir no longer needed)
       await fs.promises.mkdir(jobsIncomingDir, { recursive: true });
-      await fs.promises.mkdir(candidatesIncomingDir, { recursive: true });
       await fs.promises.mkdir(failedDir, { recursive: true });
 
       const n8nSecret = process.env.N8N_SHARED_SECRET || '';
@@ -156,6 +153,7 @@ export async function POST(request: Request) {
 
       // =====================================================================
       // 3. Process JOB DESCRIPTIONS FIRST (resumes need their job to exist)
+      //    — folder-based, unchanged —
       // =====================================================================
       let jobEntries: string[] = [];
       try {
@@ -181,7 +179,7 @@ export async function POST(request: Request) {
         // Skip files modified in the last 60 seconds (may still be copying)
         if (Date.now() - stat.mtimeMs < 60_000) {
           jobsSkipped++;
-          console.log(`[ProcessQueue] Skipping job "${fileName}" — modified less than 60s ago.`);
+          console.log(`[ProcessQueue] Skipping job "${fileName}" – modified less than 60s ago.`);
           continue;
         }
 
@@ -256,7 +254,7 @@ export async function POST(request: Request) {
             callback_url: callbackUrl,
           };
 
-          // Dispatch to job n8n webhook — no timeout, redirect: 'manual'
+          // Dispatch to job n8n webhook – no timeout, redirect: 'manual'
           if (jobWebhookUrl) {
             const webhookRes = await fetch(jobWebhookUrl, {
               method: 'POST',
@@ -287,7 +285,7 @@ export async function POST(request: Request) {
           // 2xx -> move to processed/
           await moveFileWithTimestamp(filePath, 'processed');
           jobsProcessed++;
-          console.log(`[ProcessQueue] ✓ Processed job "${fileName}" → processed/`);
+          console.log(`[ProcessQueue] ✔ Processed job "${fileName}" → processed/`);
         } catch (itemErr: any) {
           console.error(`[ProcessQueue] ✗ Error processing job "${fileName}":`, itemErr.message);
 
@@ -310,134 +308,124 @@ export async function POST(request: Request) {
       }
 
       // =====================================================================
-      // 4. Process CANDIDATE RESUMES NEXT (runs even if jobs had errors)
+      // 4. Process CANDIDATE RESUMES from resume_queue DB table
+      //    status = 'incoming' → claim as 'processing' → send to n8n →
+      //    mark 'done' or 'failed'. Do NOT set upload_batches to 'completed'
+      //    — that is left to n8n's batch-complete callback.
       // =====================================================================
-      let resumeEntries: string[] = [];
-      try {
-        resumeEntries = await fs.promises.readdir(candidatesIncomingDir);
-      } catch {
-        resumeEntries = [];
-      }
+      const incomingResult = await pool.query<{
+        id: number;
+        batch_id: string;
+        user_id: string;
+        file_name: string;
+        file_type: string;
+        resume_text: string;
+        callback_url: string;
+      }>(
+        `SELECT id, batch_id, user_id, file_name, file_type, resume_text, callback_url
+           FROM resume_queue
+          WHERE status = 'incoming'
+          ORDER BY created_at
+          LIMIT 50`
+      );
 
-      const candidateFileNames = resumeEntries.filter(isSupportedFile);
-      resumesFound = candidateFileNames.length;
+      const rows = incomingResult.rows;
+      resumesFound = rows.length;
 
-      for (const fileName of candidateFileNames) {
-        const filePath = path.join(candidatesIncomingDir, fileName);
+      if (rows.length > 0) {
+        // Atomically claim all fetched rows as 'processing'
+        const ids = rows.map((r) => r.id);
+        await pool.query(
+          `UPDATE resume_queue
+              SET status = 'processing', updated_at = NOW()
+            WHERE id = ANY($1)`,
+          [ids]
+        );
 
-        let stat: fs.Stats;
-        try {
-          stat = await fs.promises.stat(filePath);
-        } catch {
-          continue;
-        }
-        if (stat.isDirectory()) continue;
-
-        // Skip files modified in the last 60 seconds (may still be copying)
-        if (Date.now() - stat.mtimeMs < 60_000) {
-          resumesSkipped++;
-          console.log(`[ProcessQueue] Skipping candidate "${fileName}" — modified less than 60s ago.`);
-          continue;
-        }
-
-        const { userId, batchId, safeName } = parseFileName(fileName, 'batch_cand_folder');
-
-        try {
-          // Read buffer
-          const buffer = await fs.promises.readFile(filePath);
-
-          // Extract text
-          const extracted = await extractText(buffer, safeName);
-          const rawText = (extracted.text || '').trim();
-
-          if (!rawText) {
-            throw new Error(`Failed to extract readable text from "${safeName}". File appears empty or corrupted.`);
-          }
-
-          // Update batch status to 'processing' only if batch record exists
+        for (const row of rows) {
           try {
-            const batchCheck = await pool.query(
-              `SELECT id FROM upload_batches WHERE id = $1 LIMIT 1`,
-              [batchId]
-            );
-            if (batchCheck.rows.length > 0) {
-              await updateBatchStatus(batchId, {
-                status: 'processing',
-                message: `Processing file "${safeName}"…`,
+            // Update upload_batches to 'processing' if the batch record exists
+            try {
+              const batchCheck = await pool.query(
+                `SELECT id FROM upload_batches WHERE id = $1 LIMIT 1`,
+                [row.batch_id]
+              );
+              if (batchCheck.rows.length > 0) {
+                await updateBatchStatus(row.batch_id, {
+                  status: 'processing',
+                  message: `Processing file "${row.file_name}"…`,
+                });
+              }
+            } catch (batchErr: any) {
+              console.warn(`[ProcessQueue] Could not update batch "${row.batch_id}": ${batchErr.message}`);
+            }
+
+            // Build candidate resume payload (same structure as realtime mode)
+            const payload = {
+              batch_id: row.batch_id,
+              batchId: row.batch_id,
+              user_id: row.user_id,
+              userId: row.user_id,
+              created_by: row.user_id,
+              createdBy: row.user_id,
+              resumes: [
+                {
+                  file_name: row.file_name,
+                  file_type: row.file_type,
+                  text: row.resume_text,
+                },
+              ],
+              callback_url: row.callback_url,
+            };
+
+            // Dispatch to candidate n8n webhook — no timeout, redirect: 'manual'
+            if (candidateWebhookUrl) {
+              const webhookRes = await fetch(candidateWebhookUrl, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'x-webhook-secret': n8nSecret,
+                },
+                body: JSON.stringify(payload),
+                redirect: 'manual',
               });
+
+              if (webhookRes.status >= 300 && webhookRes.status < 400) {
+                const errBody = await webhookRes.text().catch(() => '');
+                throw new Error(
+                  `n8n webhook returned redirect ${webhookRes.status}: ${errBody.slice(0, 500) || 'no body'}`
+                );
+              }
+              if (!webhookRes.ok) {
+                const errBody = await webhookRes.text().catch(() => '');
+                throw new Error(
+                  `n8n webhook returned HTTP ${webhookRes.status}: ${errBody.slice(0, 500) || 'Unknown error'}`
+                );
+              }
+            } else {
+              console.warn(`[ProcessQueue] N8N_CANDIDATE_RESUME_WEBHOOK_URL not set. Skipping "${row.file_name}".`);
             }
-          } catch (batchErr: any) {
-            console.warn(`[ProcessQueue] Could not update batch "${batchId}": ${batchErr.message}`);
+
+            // Success — mark row as done
+            await pool.query(
+              `UPDATE resume_queue SET status = 'done', updated_at = NOW() WHERE id = $1`,
+              [row.id]
+            );
+            resumesProcessed++;
+            console.log(`[ProcessQueue] ✔ Sent resume "${row.file_name}" (queue id ${row.id}) to n8n.`);
+          } catch (itemErr: any) {
+            console.error(`[ProcessQueue] ✗ Error processing resume queue id ${row.id} ("${row.file_name}"):`, itemErr.message);
+
+            // Mark row as failed with error message
+            await pool.query(
+              `UPDATE resume_queue
+                  SET status = 'failed', error_message = $1, updated_at = NOW()
+                WHERE id = $2`,
+              [itemErr.message.slice(0, 1000), row.id]
+            ).catch((e) => console.error(`[ProcessQueue] Could not mark row ${row.id} as failed:`, e.message));
+
+            resumesFailed++;
           }
-
-          // Build candidate resume payload
-          const payload = {
-            batch_id: batchId,
-            batchId,
-            user_id: userId,
-            userId,
-            created_by: userId,
-            createdBy: userId,
-            resumes: [
-              {
-                file_name: safeName,
-                file_type: extracted.fileType || 'application/pdf',
-                text: rawText,
-              },
-            ],
-            callback_url: callbackUrl,
-          };
-
-          // Dispatch to candidate n8n webhook — no timeout, redirect: 'manual'
-          if (candidateWebhookUrl) {
-            const webhookRes = await fetch(candidateWebhookUrl, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'x-webhook-secret': n8nSecret,
-              },
-              body: JSON.stringify(payload),
-              redirect: 'manual',
-            });
-
-            if (webhookRes.status >= 300 && webhookRes.status < 400) {
-              const errBody = await webhookRes.text().catch(() => '');
-              throw new Error(
-                `n8n webhook returned redirect ${webhookRes.status}: ${errBody.slice(0, 500) || 'no body'}`
-              );
-            }
-            if (!webhookRes.ok) {
-              const errBody = await webhookRes.text().catch(() => '');
-              throw new Error(
-                `n8n webhook returned HTTP ${webhookRes.status}: ${errBody.slice(0, 500) || 'Unknown error'}`
-              );
-            }
-          } else {
-            console.warn(`[ProcessQueue] N8N_CANDIDATE_RESUME_WEBHOOK_URL is not set. Skipping webhook dispatch for "${safeName}".`);
-          }
-
-          // Move to processed/
-          await moveFileWithTimestamp(filePath, 'processed');
-          resumesProcessed++;
-          console.log(`[ProcessQueue] ✓ Processed resume "${fileName}" → processed/`);
-        } catch (itemErr: any) {
-          console.error(`[ProcessQueue] ✗ Error processing resume "${fileName}":`, itemErr.message);
-
-          // Move to failed/ and write error file
-          try {
-            await moveFileWithTimestamp(filePath, 'failed');
-          } catch (moveErr: any) {
-            console.error(`[ProcessQueue] Could not move "${fileName}" to failed/:`, moveErr.message);
-          }
-
-          const errorFilePath = path.join(failedDir, `${fileName}.error.txt`);
-          try {
-            await fs.promises.writeFile(errorFilePath, `${itemErr.message}\n`);
-          } catch (writeErr: any) {
-            console.error(`[ProcessQueue] Could not write error file for "${fileName}":`, writeErr.message);
-          }
-
-          resumesFailed++;
         }
       }
 
@@ -452,7 +440,6 @@ export async function POST(request: Request) {
           found: resumesFound,
           processed: resumesProcessed,
           failed: resumesFailed,
-          skipped: resumesSkipped,
         },
       });
     } finally {

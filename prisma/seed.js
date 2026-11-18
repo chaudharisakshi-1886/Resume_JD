@@ -353,7 +353,11 @@ async function main() {
     data: {
       positionId: job1.id,
       candidateId: '1678433',
+<<<<<<< Updated upstream
       fname: 'Alice',
+=======
+      fname: 'John',
+>>>>>>> Stashed changes
       lname: 'Smith',
       email: 'alice.smith@email.com',
       phone: '+1 (555) 019-2834',
@@ -367,9 +371,15 @@ async function main() {
     data: {
       positionId: job2.id,
       candidateId: '1678438',
+<<<<<<< Updated upstream
       fname: 'Bob',
       lname: 'Williams',
       email: 'bob.williams@email.com',
+=======
+      fname: 'John',
+      lname: 'Smith',
+      email: 'john.smith@email.com',
+>>>>>>> Stashed changes
       phone: '+1 (555) 888-2940',
       assessmentStatus: 'COMPLETED',
       assessmentToken: 'bob-demo-token-888',
@@ -381,9 +391,15 @@ async function main() {
     data: {
       positionId: job1.id,
       candidateId: '1678440',
+<<<<<<< Updated upstream
       fname: 'Charlie',
       lname: 'Brown',
       email: 'charlie.brown@email.com',
+=======
+      fname: 'John',
+      lname: 'Smith',
+      email: 'john.smith@email.com',
+>>>>>>> Stashed changes
       assessmentStatus: 'SCHEDULED',
       assessmentToken: 'charlie-demo-token-777',
     },
