@@ -28,9 +28,16 @@ export class NotFoundError extends Error {
 export function getJobScope(
   user: AuthenticatedUser,
   options?: { allForAdmin?: boolean }
-): { createdBy?: string } {
-  if (options?.allForAdmin && user.role === 'ADMIN') {
-    return {};
+): { createdBy?: string | { in: string[] } } {
+  if (user.role === 'ADMIN') {
+    if (options?.allForAdmin !== false) {
+      return {};
+    }
+    return {
+      createdBy: {
+        in: Array.from(new Set(['seeded-admin-user-id', 'd82463e2-872f-4886-9a25-cfb89cbe3412', user.id])),
+      },
+    };
   }
   return { createdBy: user.id };
 }
@@ -44,8 +51,17 @@ export function getCandidateScope(
   user: AuthenticatedUser,
   options?: { allForAdmin?: boolean }
 ) {
-  if (options?.allForAdmin && user.role === 'ADMIN') {
-    return {};
+  if (user.role === 'ADMIN') {
+    if (options?.allForAdmin !== false) {
+      return {};
+    }
+    return {
+      job: {
+        createdBy: {
+          in: Array.from(new Set(['seeded-admin-user-id', 'd82463e2-872f-4886-9a25-cfb89cbe3412', user.id])),
+        },
+      },
+    };
   }
   return {
     job: { createdBy: user.id },

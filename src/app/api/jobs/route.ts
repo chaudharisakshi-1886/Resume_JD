@@ -14,7 +14,7 @@ export async function GET(request: Request) {
 
     const { searchParams } = new URL(request.url);
     const scopeParam = searchParams.get('scope');
-    const allForAdmin = user.role === 'ADMIN' && scopeParam === 'all';
+    const allForAdmin = user.role === 'ADMIN' && scopeParam !== 'mine';
 
     // Tenant-isolated query: strictly user's own jobs by default; only ADMIN with scope=all sees team jobs
     const scope = getJobScope(user, { allForAdmin });

@@ -47,7 +47,7 @@ export default function JobsPage() {
 
   // User role and administrative scope toggle ('mine' = strictly caller's uploads, 'all' = team-wide)
   const [currentUser, setCurrentUser] = React.useState<any>(null);
-  const [adminScope, setAdminScope] = React.useState<'mine' | 'all'>('mine');
+  const [adminScope, setAdminScope] = React.useState<'mine' | 'all'>('all');
 
   // Status Filter for JDs
   const [jdStatusFilter, setJdStatusFilter] = React.useState('All');
@@ -115,8 +115,8 @@ export default function JobsPage() {
 
     if (hasFetched.current) return;
     hasFetched.current = true;
-    fetchJobDescriptions('mine');
-    fetchJobs('mine');
+    fetchJobDescriptions('all');
+    fetchJobs('all');
   }, []);
 
   const handleCopyJD = (text: string) => {

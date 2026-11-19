@@ -13,19 +13,26 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const search = searchParams.get('search')?.toLowerCase() || '';
     const scopeParam = searchParams.get('scope');
-    const allForAdmin = user.role === 'ADMIN' && scopeParam === 'all';
+    const isAdmin = user.role === 'ADMIN';
+    // Admin sees all by default, or whenever scope is not explicitly 'mine'
+    const allForAdmin = isAdmin && scopeParam !== 'mine';
 
-    // Strict multi-tenant user isolation:
-    // User sees ONLY their own job descriptions unless ADMIN explicitly requested scope=all.
-    const jdCondition = allForAdmin ? '' : `WHERE jd."createdBy" = $1`;
-    const jdParams = allForAdmin ? [] : [user.id];
+    // When filtering by 'mine', include both admin user IDs if the caller is admin
+    const adminIds = ['seeded-admin-user-id', 'd82463e2-872f-4886-9a25-cfb89cbe3412'];
+    if (isAdmin && !adminIds.includes(user.id)) {
+      adminIds.push(user.id);
+    }
+
+    const jdCondition = allForAdmin
+      ? ''
+      : (isAdmin ? `WHERE jd."createdBy" = ANY($1)` : `WHERE jd."createdBy" = $1`);
+    const jdParams: any[] = allForAdmin ? [] : (isAdmin ? [adminIds] : [user.id]);
 
     // Query job_descriptions joined with candidate counts from output1 table
     const res = await pool.query(`
       SELECT 
-        jd.id::text as "id",
         jd.content_hash as "contentHash",
-        COALESCE(jd.job_code, jd.id::text, 'N/A') as "jobCode",
+        COALESCE(jd.job_code, 'N/A') as "jobCode",
         COALESCE(jd.job_title, 'Untitled Job') as "jobTitle",
         COALESCE(jd.jd_text, '') as "jdText",
         jd.created_at as "createdAt",
@@ -39,7 +46,7 @@ export async function GET(request: Request) {
         FROM output1
         WHERE job_code IS NOT NULL
         GROUP BY TRIM(job_code)
-      ) m ON TRIM(m.job_code) = TRIM(COALESCE(jd.job_code, jd.id::text))
+      ) m ON TRIM(m.job_code) = TRIM(jd.job_code)
       ${jdCondition}
       ORDER BY jd.created_at DESC;
     `, jdParams);
@@ -58,8 +65,10 @@ export async function GET(request: Request) {
     // Strictly isolate output to records belonging to user's JDs
     const outCondition = allForAdmin
       ? ''
-      : `WHERE o.job_code IN (SELECT job_code FROM job_descriptions WHERE "createdBy" = $1)`;
-    const outParams = allForAdmin ? [] : [user.id];
+      : (isAdmin
+          ? `WHERE o.job_code IN (SELECT job_code FROM job_descriptions WHERE "createdBy" = ANY($1))`
+          : `WHERE o.job_code IN (SELECT job_code FROM job_descriptions WHERE "createdBy" = $1)`);
+    const outParams: any[] = allForAdmin ? [] : (isAdmin ? [adminIds] : [user.id]);
 
     const candidatesRes = await pool.query(`
       SELECT 
@@ -114,7 +123,7 @@ export async function GET(request: Request) {
     const totalMatchedCandidates = parseInt(totalCandidatesRes.rows[0]?.count || '0', 10);
 
     const candidatesByJob: Record<string, any[]> = {};
-    candidatesRes.rows.forEach((c) => {
+    candidatesRes.rows.forEach((c: any) => {
       const code = c.jobCode ? c.jobCode.trim() : '';
       if (code) {
         if (!candidatesByJob[code]) {
@@ -124,7 +133,7 @@ export async function GET(request: Request) {
       }
     });
 
-    const enrichedDescriptions = jobDescriptions.map((jd) => {
+    const enrichedDescriptions = jobDescriptions.map((jd: any) => {
       const code = jd.jobCode ? jd.jobCode.trim() : '';
       const matched = code ? (candidatesByJob[code] || []) : [];
       return {
