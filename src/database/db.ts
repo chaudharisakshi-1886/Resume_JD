@@ -30,6 +30,35 @@ if (process.env.NODE_ENV !== 'production') {
 
 const adapter = new PrismaPg(pool);
 
+function safeParseArray<T = string>(val: any): T[] {
+  if (!val) return [];
+  if (Array.isArray(val)) return val;
+  if (typeof val === 'string') {
+    try {
+      const parsed = JSON.parse(val);
+      if (Array.isArray(parsed)) return parsed;
+      if (parsed) return [parsed as T];
+    } catch {
+      return val.trim() ? [val.trim() as unknown as T] : [];
+    }
+  }
+  return [];
+}
+
+function safeParseObject(val: any): Record<string, any> {
+  if (!val) return {};
+  if (typeof val === 'object' && !Array.isArray(val)) return val;
+  if (typeof val === 'string') {
+    try {
+      const parsed = JSON.parse(val);
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) return parsed;
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
 const createPrismaClient = () => {
   const basePrisma = new PrismaClient({
     adapter,
@@ -59,13 +88,13 @@ const createPrismaClient = () => {
           },
           compute(j) {
             return {
-              skills: j.skills || [],
-              mustHave: j.mustHave || [],
-              goodToHave: j.goodToHave || [],
-              experience: j.experience || '',
-              seniority: j.seniority || '',
-              topics: j.topics || [],
-              weights: j.weights || {},
+              skills: safeParseArray(j.skills),
+              mustHave: safeParseArray(j.mustHave),
+              goodToHave: safeParseArray(j.goodToHave),
+              experience: typeof j.experience === 'string' ? j.experience : '',
+              seniority: typeof j.seniority === 'string' ? j.seniority : '',
+              topics: safeParseArray(j.topics),
+              weights: safeParseObject(j.weights),
             };
           },
         },

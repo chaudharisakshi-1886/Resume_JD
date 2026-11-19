@@ -68,7 +68,48 @@ export default function JobDetailPage() {
     );
   }
 
-  const { parsedJDData, questions } = job;
+  const parsedJDData = React.useMemo(() => {
+    const raw = job?.parsedJDData || {};
+    const toArr = (val: any): string[] => {
+      if (!val) return [];
+      if (Array.isArray(val)) return val.map(String);
+      if (typeof val === 'string') {
+        try {
+          const p = JSON.parse(val);
+          if (Array.isArray(p)) return p.map(String);
+          if (p) return [String(p)];
+        } catch {
+          return val.trim() ? [val.trim()] : [];
+        }
+      }
+      return [];
+    };
+
+    const toObj = (val: any): Record<string, number> => {
+      if (!val) return {};
+      if (typeof val === 'object' && !Array.isArray(val)) return val;
+      if (typeof val === 'string') {
+        try {
+          const p = JSON.parse(val);
+          if (typeof p === 'object' && p !== null && !Array.isArray(p)) return p;
+        } catch {
+          return {};
+        }
+      }
+      return {};
+    };
+
+    return {
+      seniority: raw.seniority || '',
+      experience: raw.experience || '',
+      weights: toObj(raw.weights),
+      mustHave: toArr(raw.mustHave),
+      goodToHave: toArr(raw.goodToHave),
+      topics: toArr(raw.topics),
+    };
+  }, [job]);
+
+  const questions = job.questions || [];
 
   const columns = [
     {
@@ -275,7 +316,7 @@ export default function JobDetailPage() {
               </div>
               <div className="p-6">
                 <ul className="list-disc pl-5 space-y-2 text-sm text-neutral-700">
-                  {parsedJDData?.mustHave && parsedJDData.mustHave.length > 0 ? (
+                  {Array.isArray(parsedJDData?.mustHave) && parsedJDData.mustHave.length > 0 ? (
                     parsedJDData.mustHave.map((item, idx) => (
                       <li key={idx} className="leading-relaxed">{item}</li>
                     ))
@@ -294,7 +335,7 @@ export default function JobDetailPage() {
               </div>
               <div className="p-6">
                 <ul className="list-disc pl-5 space-y-2 text-sm text-neutral-700">
-                  {parsedJDData?.goodToHave && parsedJDData.goodToHave.length > 0 ? (
+                  {Array.isArray(parsedJDData?.goodToHave) && parsedJDData.goodToHave.length > 0 ? (
                     parsedJDData.goodToHave.map((item, idx) => (
                       <li key={idx} className="leading-relaxed">{item}</li>
                     ))
@@ -313,7 +354,7 @@ export default function JobDetailPage() {
               </div>
               <div className="p-6">
                 <div className="flex flex-wrap gap-2">
-                  {parsedJDData?.topics && parsedJDData.topics.length > 0 ? (
+                  {Array.isArray(parsedJDData?.topics) && parsedJDData.topics.length > 0 ? (
                     parsedJDData.topics.map((topic, idx) => (
                       <span
                         key={idx}

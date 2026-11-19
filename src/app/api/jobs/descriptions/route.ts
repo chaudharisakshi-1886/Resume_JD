@@ -29,7 +29,7 @@ export async function GET(request: Request) {
         COALESCE(jd.jd_text, '') as "jdText",
         jd.created_at as "createdAt",
         COALESCE(jd.status, 'Active') as "status",
-        jd.inactive_at as "inactiveAt",
+        NULL::timestamptz as "inactiveAt",
         COALESCE(jd."createdBy", '') as "createdBy",
         COALESCE(m.candidates_count, 0)::int as "candidatesCount"
       FROM job_descriptions jd
