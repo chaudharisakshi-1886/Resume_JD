@@ -23,8 +23,9 @@ export async function GET(request: Request) {
     // Query job_descriptions joined with candidate counts from output1 table
     const res = await pool.query(`
       SELECT 
+        jd.id::text as "id",
         jd.content_hash as "contentHash",
-        COALESCE(jd.job_code, 'N/A') as "jobCode",
+        COALESCE(jd.job_code, jd.id::text, 'N/A') as "jobCode",
         COALESCE(jd.job_title, 'Untitled Job') as "jobTitle",
         COALESCE(jd.jd_text, '') as "jdText",
         jd.created_at as "createdAt",
@@ -38,7 +39,7 @@ export async function GET(request: Request) {
         FROM output1
         WHERE job_code IS NOT NULL
         GROUP BY TRIM(job_code)
-      ) m ON TRIM(m.job_code) = TRIM(jd.job_code)
+      ) m ON TRIM(m.job_code) = TRIM(COALESCE(jd.job_code, jd.id::text))
       ${jdCondition}
       ORDER BY jd.created_at DESC;
     `, jdParams);
