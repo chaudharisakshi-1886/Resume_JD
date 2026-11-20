@@ -19,3 +19,4 @@ CREATE TABLE IF NOT EXISTS resume_queue (
 
 CREATE INDEX IF NOT EXISTS idx_resume_queue_status ON resume_queue(status);
 CREATE INDEX IF NOT EXISTS idx_resume_queue_batch  ON resume_queue(batch_id);
+

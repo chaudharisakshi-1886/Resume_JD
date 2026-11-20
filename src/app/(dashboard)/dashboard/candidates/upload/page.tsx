@@ -642,7 +642,7 @@ export default function UploadCandidateResumePage() {
                   <h3 className="text-base font-bold text-neutral-900 flex flex-wrap items-center gap-2">
                     <span>
                       {batchResult.inserted_count > 0 && batchResult.duplicate_count === 0 && batchResult.failed_count === 0
-                        ? 'All Candidate Resumes Inserted Successfully'
+                        ? (batchResult.inserted_count === 1 ? 'Resume Added Successfully' : 'All Candidate Resumes Inserted Successfully')
                         : batchResult.inserted_count === 0 && batchResult.duplicate_count > 0 && batchResult.failed_count === 0
                           ? 'Duplicate Candidate Resumes Found'
                           : batchResult.inserted_count === 0 && batchResult.failed_count > 0

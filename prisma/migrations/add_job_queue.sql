@@ -20,3 +20,4 @@ CREATE TABLE IF NOT EXISTS job_queue (
 
 CREATE INDEX IF NOT EXISTS idx_job_queue_status ON job_queue(status);
 CREATE INDEX IF NOT EXISTS idx_job_queue_batch  ON job_queue(batch_id);
+

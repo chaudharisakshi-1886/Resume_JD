@@ -551,156 +551,30 @@ export async function processCandidateBatchAsync(
     }
 
     // 5. Asynchronous n8n workflow acknowledgment (e.g. {"message": "Workflow was started"}):
-    // n8n is running in background. Monitor Supabase to verify when database insertion is complete!
-    console.log(
-      `[Async Batch ${batchId}] n8n workflow started asynchronously. Monitoring Supabase for ${newItems.length} new candidate(s)...`
-    );
-
-    const insertedRecords: UploadRecordDetail[] = [];
+    // When n8n acknowledges the request with HTTP 2xx, finalize the batch as completed!
+    const successMsg = resumesPayload.length === 1 ? 'Resume added successfully' : 'Resumes added successfully';
+    const insertedRecords: UploadRecordDetail[] = newItems.map((r) => ({
+      file_name: r.file_name,
+      file_type: r.file_type,
+      status: 'inserted',
+    }));
     const duplicateRecords: UploadRecordDetail[] = Array.from(knownDuplicates.values());
-    const failedRecords: UploadRecordDetail[] = [];
-
-    // If all items were already duplicates, we are done immediately!
-    if (newItems.length === 0) {
-      const msg = formatBatchResultMessage(0, duplicateRecords.length, 0, 'candidate');
-      await updateBatchStatus(batchId, {
-        status: 'completed',
-        inserted_count: 0,
-        duplicate_count: duplicateRecords.length,
-        failed_count: 0,
-        message: msg,
-        inserted_records: [],
-        duplicate_records: duplicateRecords,
-        failed_records: [],
-      });
-      return;
-    }
-
-    // Poll Supabase for items to appear, with a sensible timeout (max 30 attempts, ~45s)
-    let remainingNew = [...newItems];
-    const maxAttempts = 30;
-    const intervalMs = 1500;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      // Check if external webhook (batch-complete) already finalized this batch
-      const currentCheck = await pool.query(
-        `SELECT status FROM upload_batches WHERE id = $1`,
-        [batchId]
-      );
-      if (
-        currentCheck.rows.length > 0 &&
-        ['completed', 'completed_with_errors', 'failed'].includes(currentCheck.rows[0].status)
-      ) {
-        console.log(`[Async Batch ${batchId}] Batch already finalized externally.`);
-        return;
-      }
-
-      const stillPending: typeof remainingNew = [];
-
-      for (const item of remainingNew) {
-        const textVal = (item.text || '').trim();
-        const sha256 = crypto.createHash('sha256').update(textVal).digest('hex');
-        const emailMatch = textVal.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-        const email = emailMatch ? emailMatch[0].toLowerCase().trim() : null;
-        const fallbackName = item.file_name.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ').trim();
-
-        try {
-          const queryRes = await pool.query(
-            `SELECT id, candidate_id, candidate_fname, candidate_lname, candidate_email, created_at
-             FROM candidate1
-             WHERE upload_batch_id = $1
-                OR ($2::text IS NOT NULL AND LOWER(TRIM(candidate_email)) = $2)
-                OR resume_text = $3
-             LIMIT 1;`,
-            [batchId, email, textVal]
-          );
-
-          if (queryRes.rows.length > 0) {
-            const found = queryRes.rows[0];
-            const fullName =
-              [found.candidate_fname, found.candidate_lname].filter(Boolean).join(' ') ||
-              fallbackName;
-
-            // Stamp created_by = userId in candidates and output
-            await pool.query(
-              `UPDATE candidates SET created_by = $1 WHERE id = $2 AND (created_by IS NULL OR created_by = 'seeded-admin-user-id')`,
-              [userId, found.id]
-            ).catch(() => {});
-            if (found.candidate_id || email) {
-              await pool.query(
-                `UPDATE output SET created_by = $1 WHERE (candidate_id = $2 OR LOWER(candidate_email) = $3) AND (created_by IS NULL OR created_by = 'seeded-admin-user-id')`,
-                [userId, found.candidate_id || found.id, email || '']
-              ).catch(() => {});
-            }
-
-            insertedRecords.push({
-              file_name: item.file_name,
-              candidate_id: found.candidate_id || found.id,
-              candidate_name: fullName,
-              candidate_email: found.candidate_email || email || 'Email not detected',
-              status: 'inserted',
-              file_type: item.file_type,
-            });
-          } else {
-            stillPending.push(item);
-          }
-        } catch (dbErr: any) {
-          console.warn(`[Async Batch ${batchId}] DB query error:`, dbErr.message);
-          stillPending.push(item);
-        }
-      }
-
-      remainingNew = stillPending;
-
-      if (remainingNew.length === 0) {
-        // All new items have been successfully inserted in Supabase!
-        break;
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    }
-
-    // Any items that never appeared in Supabase after timeout are marked failed
-    for (const item of remainingNew) {
-      failedRecords.push({
-        file_name: item.file_name,
-        error: 'n8n workflow did not complete insertion in Supabase within expected timeframe.',
-        status: 'failed',
-      });
-    }
-
-    const insertedCount = insertedRecords.length;
-    const duplicateCount = duplicateRecords.length;
-    const failedCount = failedRecords.length;
-
-    const finalStatus: BatchStatus =
-      failedCount === resumesPayload.length
-        ? 'failed'
-        : failedCount > 0
-        ? 'completed_with_errors'
-        : 'completed';
-
-    const finalMessage = formatBatchResultMessage(
-      insertedCount,
-      duplicateCount,
-      failedCount,
-      'candidate'
-    );
 
     await updateBatchStatus(batchId, {
-      status: finalStatus,
-      inserted_count: insertedCount,
-      duplicate_count: duplicateCount,
-      failed_count: failedCount,
-      message: finalMessage,
+      status: 'completed',
+      inserted_count: newItems.length,
+      duplicate_count: duplicateRecords.length,
+      failed_count: 0,
+      message: successMsg,
       inserted_records: insertedRecords,
       duplicate_records: duplicateRecords,
-      failed_records: failedRecords,
+      failed_records: [],
     });
 
     console.log(
-      `[Async Batch ${batchId}] Finalized with status "${finalStatus}": ${insertedCount} inserted, ${duplicateCount} duplicates, ${failedCount} failed.`
+      `[Async Batch ${batchId}] n8n acknowledged. Finalized batch with status "completed" (${successMsg}).`
     );
+    return;
   } catch (err: any) {
     console.error(`[Async Batch ${batchId}] Unexpected error in processor:`, err);
     await updateBatchStatus(batchId, {
@@ -861,143 +735,31 @@ export async function processJobBatchAsync(
       return;
     }
 
-    // 5. Asynchronous n8n workflow acknowledgment
-    console.log(
-      `[Async Batch ${batchId}] n8n workflow started asynchronously. Monitoring Supabase for ${newItems.length} new JD(s)...`
-    );
-
-    const insertedRecords: UploadRecordDetail[] = [];
-    const duplicateRecords: UploadRecordDetail[] = Array.from(knownDuplicates.values());
-    const failedRecords: UploadRecordDetail[] = [];
-
-    if (newItems.length === 0) {
-      const msg = formatBatchResultMessage(0, duplicateRecords.length, 0, 'job');
-      await updateBatchStatus(batchId, {
-        status: 'completed',
-        inserted_count: 0,
-        duplicate_count: duplicateRecords.length,
-        failed_count: 0,
-        message: msg,
-        inserted_records: [],
-        duplicate_records: duplicateRecords,
-        failed_records: [],
-      });
-      return;
-    }
-
-    let remainingNew = [...newItems];
-    const maxAttempts = 30;
-    const intervalMs = 1500;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const currentCheck = await pool.query(
-        `SELECT status FROM upload_batches WHERE id = $1`,
-        [batchId]
-      );
-      if (
-        currentCheck.rows.length > 0 &&
-        ['completed', 'completed_with_errors', 'failed'].includes(currentCheck.rows[0].status)
-      ) {
-        console.log(`[Async Batch ${batchId}] Batch already finalized externally.`);
-        return;
-      }
-
-      const stillPending: typeof remainingNew = [];
-
-      for (const item of remainingNew) {
-        const textVal = (item.text || '').trim();
-        const sha256 = crypto.createHash('sha256').update(textVal).digest('hex');
-        const codeMatch =
-          item.file_name.match(/(J\d{3,4}|ADM-\d{3}|[A-Z]{2,5}-\d{2,4})/i) ||
-          textVal.match(/(?:Job Code|Position ID|Req ID|Code)[\s:-]+([A-Z0-9-]+)/i);
-        const code = codeMatch ? codeMatch[1].trim() : null;
-        const title = item.file_name.replace(/\.[^/.]+$/, '').trim();
-
-        try {
-          const queryRes = await pool.query(
-            `SELECT content_hash, job_code, job_title
-             FROM job_descriptions
-             WHERE content_hash = $1
-                OR (job_code IS NOT NULL AND $2::text IS NOT NULL AND TRIM(LOWER(job_code)) = TRIM(LOWER($2)))
-                OR jd_text = $3
-             LIMIT 1;`,
-            [sha256, code, textVal]
-          );
-
-          if (queryRes.rows.length > 0) {
-            const found = queryRes.rows[0];
-
-            // Stamp created_by = userId in job_descriptions
-            await pool.query(
-              `UPDATE job_descriptions SET created_by = $1 WHERE content_hash = $2 AND (created_by IS NULL OR created_by = 'seeded-admin-user-id')`,
-              [userId, found.content_hash || sha256]
-            ).catch(() => {});
-
-            insertedRecords.push({
-              file_name: item.file_name,
-              job_code: found.job_code || code || 'New JD',
-              job_title: found.job_title || title,
-              status: 'inserted',
-              file_type: item.file_type,
-            });
-          } else {
-            stillPending.push(item);
-          }
-        } catch (dbErr: any) {
-          console.warn(`[Async Batch ${batchId}] DB query error:`, dbErr.message);
-          stillPending.push(item);
-        }
-      }
-
-      remainingNew = stillPending;
-
-      if (remainingNew.length === 0) {
-        break;
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    }
-
-    for (const item of remainingNew) {
-      failedRecords.push({
-        file_name: item.file_name,
-        error: 'n8n workflow did not complete insertion in Supabase within expected timeframe.',
-        status: 'failed',
-      });
-    }
-
-    const insertedCount = insertedRecords.length;
-    const duplicateCount = duplicateRecords.length;
-    const failedCount = failedRecords.length;
-
-    const finalStatus: BatchStatus =
-      failedCount === jobDescriptionsPayload.length
-        ? 'failed'
-        : failedCount > 0
-        ? 'completed_with_errors'
-        : 'completed';
-
-    const finalMessage = formatBatchResultMessage(
-      insertedCount,
-      duplicateCount,
-      failedCount,
-      'job'
-    );
+    // 5. Asynchronous n8n workflow acknowledgment:
+    // When n8n acknowledges the request with HTTP 2xx, finalize the batch as completed!
+    const successJobMsg = jobDescriptionsPayload.length === 1 ? 'Job description added successfully' : 'Job descriptions added successfully';
+    const insertedJobRecords: UploadRecordDetail[] = newItems.map((j) => ({
+      file_name: j.file_name,
+      file_type: j.file_type,
+      status: 'inserted',
+    }));
+    const duplicateJobRecords: UploadRecordDetail[] = Array.from(knownDuplicates.values());
 
     await updateBatchStatus(batchId, {
-      status: finalStatus,
-      inserted_count: insertedCount,
-      duplicate_count: duplicateCount,
-      failed_count: failedCount,
-      message: finalMessage,
-      inserted_records: insertedRecords,
-      duplicate_records: duplicateRecords,
-      failed_records: failedRecords,
+      status: 'completed',
+      inserted_count: newItems.length,
+      duplicate_count: duplicateJobRecords.length,
+      failed_count: 0,
+      message: successJobMsg,
+      inserted_records: insertedJobRecords,
+      duplicate_records: duplicateJobRecords,
+      failed_records: [],
     });
 
     console.log(
-      `[Async Batch ${batchId}] Finalized with status "${finalStatus}": ${insertedCount} inserted, ${duplicateCount} duplicates, ${failedCount} failed.`
+      `[Async Batch ${batchId}] n8n acknowledged. Finalized batch with status "completed" (${successJobMsg}).`
     );
+    return;
   } catch (err: any) {
     console.error(`[Async Batch ${batchId}] Unexpected error in processor:`, err);
     await updateBatchStatus(batchId, {

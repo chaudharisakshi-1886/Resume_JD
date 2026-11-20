@@ -187,6 +187,27 @@ export async function POST(request: Request) {
               `UPDATE job_queue SET status = 'done', updated_at = NOW() WHERE id = $1`,
               [row.id]
             );
+
+            // Update upload_batches to 'completed' with 'Job description added successfully'
+            try {
+              await updateBatchStatus(row.batch_id, {
+                status: 'completed',
+                inserted_count: 1,
+                duplicate_count: 0,
+                failed_count: 0,
+                message: 'Job description added successfully',
+                inserted_records: [
+                  {
+                    file_name: row.file_name,
+                    file_type: row.file_type,
+                    status: 'inserted',
+                  },
+                ],
+              });
+            } catch (batchErr: any) {
+              console.warn(`[ProcessQueue] Could not finalize batch "${row.batch_id}": ${batchErr.message}`);
+            }
+
             jobsProcessed++;
             console.log(`[ProcessQueue] ✔ Sent job "${row.file_name}" (queue id ${row.id}) to n8n.`);
           } catch (itemErr: any) {
@@ -305,6 +326,27 @@ export async function POST(request: Request) {
               `UPDATE resume_queue SET status = 'done', updated_at = NOW() WHERE id = $1`,
               [row.id]
             );
+
+            // Update upload_batches to 'completed' with 'Resume added successfully'
+            try {
+              await updateBatchStatus(row.batch_id, {
+                status: 'completed',
+                inserted_count: 1,
+                duplicate_count: 0,
+                failed_count: 0,
+                message: 'Resume added successfully',
+                inserted_records: [
+                  {
+                    file_name: row.file_name,
+                    file_type: row.file_type,
+                    status: 'inserted',
+                  },
+                ],
+              });
+            } catch (batchErr: any) {
+              console.warn(`[ProcessQueue] Could not finalize batch "${row.batch_id}": ${batchErr.message}`);
+            }
+
             resumesProcessed++;
             console.log(`[ProcessQueue] ✔ Sent resume "${row.file_name}" (queue id ${row.id}) to n8n.`);
           } catch (itemErr: any) {
