@@ -55,16 +55,19 @@ export function getCandidateScope(
     if (options?.allForAdmin !== false) {
       return {};
     }
+    const adminIds = Array.from(new Set(['seeded-admin-user-id', 'd82463e2-872f-4886-9a25-cfb89cbe3412', user.id]));
     return {
-      job: {
-        createdBy: {
-          in: Array.from(new Set(['seeded-admin-user-id', 'd82463e2-872f-4886-9a25-cfb89cbe3412', user.id])),
-        },
-      },
+      OR: [
+        { userId: { in: adminIds } },
+        { job: { createdBy: { in: adminIds } } },
+      ],
     };
   }
   return {
-    job: { createdBy: user.id },
+    OR: [
+      { userId: user.id },
+      { job: { createdBy: user.id } },
+    ],
   };
 }
 
@@ -124,6 +127,7 @@ export async function assertCandidateOwnership(
   }
 
   const isOwner =
+    candidate.userId === user.id ||
     candidate.job?.createdBy === user.id ||
     user.role === 'ADMIN' ||
     Boolean(options?.allowAdminOverride);
