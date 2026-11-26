@@ -67,7 +67,7 @@ export async function GET(request: Request) {
     // ADMIN can access all if explicitly needed, but standard is isolated to caller
     if (user.role !== 'ADMIN') {
       params.push(user.id);
-      query += ` AND (o.created_by = $${params.length} OR o.job_code IN (SELECT job_code FROM job_descriptions WHERE created_by = $${params.length}))`;
+      query += ` AND (o.created_by = $${params.length} OR o.job_code IN (SELECT job_code FROM job_descriptions WHERE "createdBy" = $${params.length}))`;
     }
 
     if (id) {
