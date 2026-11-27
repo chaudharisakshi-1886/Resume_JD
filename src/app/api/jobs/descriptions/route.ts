@@ -112,14 +112,16 @@ export async function GET(request: Request) {
         COALESCE(c.candidate_location, c.candidate_address) as "location"
       FROM output1 o
       LEFT JOIN candidate1 c ON TRIM(c.candidate_id) = TRIM(o.candidate_id)
+      ${outCondition}
       ORDER BY o.match_percent DESC NULLS LAST;
     `, outParams);
 
-    // Fetch total distinct matched candidates across all jobs in output1
+    // Fetch total distinct matched candidates across user's jobs in output1
     const totalCandidatesRes = await pool.query(`
-      SELECT COUNT(DISTINCT candidate_id) as count
-      FROM output1;
-    `).catch(() => ({ rows: [{ count: '0' }] }));
+      SELECT COUNT(DISTINCT o.candidate_id) as count
+      FROM output1 o
+      ${outCondition};
+    `, outParams).catch(() => ({ rows: [{ count: '0' }] }));
     const totalMatchedCandidates = parseInt(totalCandidatesRes.rows[0]?.count || '0', 10);
 
     const candidatesByJob: Record<string, any[]> = {};
