@@ -21,8 +21,8 @@ export default async function DashboardPage() {
     redirect('/login');
   }
 
-  const jobScope = getJobScope(user);
-  const candidateScope = getCandidateScope(user);
+  const jobScope = getJobScope(user, { allForAdmin: false });
+  const candidateScope = getCandidateScope(user, { allForAdmin: false });
   const assessmentScope = { candidate: candidateScope };
 
   // Run queries in parallel

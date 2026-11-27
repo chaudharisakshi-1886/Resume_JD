@@ -14,8 +14,8 @@ export async function GET(request: Request) {
     const search = searchParams.get('search')?.toLowerCase() || '';
     const scopeParam = searchParams.get('scope');
     const isAdmin = user.role === 'ADMIN';
-    // Admin sees all by default, or whenever scope is not explicitly 'mine'
-    const allForAdmin = isAdmin && scopeParam !== 'mine';
+    // Strictly show current logged-in user's jobs by default; Admin sees all only when scope=all
+    const allForAdmin = isAdmin && scopeParam === 'all';
 
     // When filtering by 'mine', include both admin user IDs if the caller is admin
     const adminIds = ['seeded-admin-user-id', 'd82463e2-872f-4886-9a25-cfb89cbe3412'];
